@@ -32,6 +32,7 @@ import { getProviderAlias, resolveProviderId } from "@/shared/constants/provider
 import * as log from "../utils/logger";
 import { fisherYatesShuffle, getNextFromDeckSync } from "@/shared/utils/shuffleDeck";
 import { getDbInstance } from "@/lib/db/core";
+import { isModelExcludedByConnection } from "@/domain/connectionModelRules";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -698,6 +699,9 @@ export async function getProviderCredentials(
     // Filter out unavailable accounts and excluded connection
     const availableConnections = connections.filter((c) => {
       if (excludedConnectionIds.has(c.id)) return false;
+      if (requestedModel && isModelExcludedByConnection(requestedModel, c.providerSpecificData)) {
+        return false;
+      }
       if (!allowSuppressedConnections) {
         if (isAccountUnavailable(c.rateLimitedUntil)) return false;
         if (isTerminalConnectionStatus(c)) return false;
@@ -1042,11 +1046,14 @@ export async function getProviderCredentials(
         connection = sorted[0];
         log.debug(
           "AUTH",
-          `${provider} least-tokens: picked ${connection.id?.slice(0, 8)} (${usageMap.get(connection.id) ?? 0} tokens) from ${orderedConnections.length} available [${orderedConnections.map(c => `${c.id.slice(0,8)}:${usageMap.get(c.id) ?? 0}`).join(", ")}]`
+          `${provider} least-tokens: picked ${connection.id?.slice(0, 8)} (${usageMap.get(connection.id) ?? 0} tokens) from ${orderedConnections.length} available [${orderedConnections.map((c) => `${c.id.slice(0, 8)}:${usageMap.get(c.id) ?? 0}`).join(", ")}]`
         );
       } catch (e: any) {
         connection = orderedConnections[0];
-        log.warn("AUTH", `${provider} least-tokens: DB query failed (${e?.message}), falling back to first`);
+        log.warn(
+          "AUTH",
+          `${provider} least-tokens: DB query failed (${e?.message}), falling back to first`
+        );
       }
     } else if (strategy === "most-quota-remaining") {
       try {
@@ -1064,7 +1071,12 @@ export async function getProviderCredentials(
                  GROUP BY connection_id, window_key
                )`
           )
-          .all(ids, ids) as Array<{ connection_id: string; window_key: string; remaining_percentage: number; created_at: string }>;
+          .all(ids, ids) as Array<{
+          connection_id: string;
+          window_key: string;
+          remaining_percentage: number;
+          created_at: string;
+        }>;
         const minByConn = new Map<string, number>();
         for (const r of rows) {
           const cur = minByConn.get(r.connection_id);
@@ -1077,11 +1089,14 @@ export async function getProviderCredentials(
         connection = sorted[0];
         log.debug(
           "AUTH",
-          `${provider} most-quota-remaining: picked ${connection.id?.slice(0, 8)} (${minByConn.get(connection.id) ?? 100}% min remaining) from ${orderedConnections.length} available [${orderedConnections.map(c => `${c.id.slice(0,8)}:${minByConn.get(c.id) ?? 100}%`).join(", ")}]`
+          `${provider} most-quota-remaining: picked ${connection.id?.slice(0, 8)} (${minByConn.get(connection.id) ?? 100}% min remaining) from ${orderedConnections.length} available [${orderedConnections.map((c) => `${c.id.slice(0, 8)}:${minByConn.get(c.id) ?? 100}%`).join(", ")}]`
         );
       } catch (e: any) {
         connection = orderedConnections[0];
-        log.warn("AUTH", `${provider} most-quota-remaining: DB query failed (${e?.message}), falling back to first`);
+        log.warn(
+          "AUTH",
+          `${provider} most-quota-remaining: DB query failed (${e?.message}), falling back to first`
+        );
       }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
