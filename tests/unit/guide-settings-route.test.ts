@@ -3,10 +3,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+const DUMMY_HOME = await fs.mkdtemp(path.join(os.tmpdir(), "omniroute-qwen-test-"));
+const TEST_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "omniroute-qwen-db-"));
+const originalDataDir = process.env.DATA_DIR;
+process.env.DATA_DIR = TEST_DATA_DIR;
+
+const core = await import("../../src/lib/db/core.ts");
+const settingsDb = await import("../../src/lib/db/settings.ts");
 const guideSettingsRoute =
   await import("../../src/app/api/cli-tools/guide-settings/[toolId]/route.ts");
 
-const DUMMY_HOME = path.join(os.tmpdir(), "omniroute-qwen-test-" + Date.now());
 const QWEN_CONFIG_PATH = path.join(DUMMY_HOME, ".qwen", "settings.json");
 const QWEN_ENV_PATH = path.join(DUMMY_HOME, ".qwen", ".env");
 
@@ -28,9 +35,18 @@ function buildRequest(body: any) {
 }
 
 test.beforeEach(async () => {
-  // Mock os.homedir to return our dummy path
+  core.resetDbInstance();
+  await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(TEST_DATA_DIR, { recursive: true });
+  await settingsDb.updateSettings({ requireLogin: false });
   os.homedir = () => DUMMY_HOME;
   await fs.mkdir(path.dirname(QWEN_CONFIG_PATH), { recursive: true }).catch(() => {});
+});
+
+test.after(async () => {
+  core.resetDbInstance();
+  process.env.DATA_DIR = originalDataDir;
+  await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {});
 });
 
 test.afterEach(async () => {
