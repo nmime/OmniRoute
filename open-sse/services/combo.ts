@@ -115,11 +115,55 @@ const COMBO_BAD_REQUEST_FALLBACK_PATTERNS = [
 // Used to detect 503 responses from handleNoCredentials so combo can fallback.
 const ALL_ACCOUNTS_RATE_LIMITED_PATTERNS = [/unavailable/i, /service temporarily unavailable/i];
 
+function normalizeComboRetryAfter(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value > 1_000_000_000_000) return new Date(value).toISOString();
+    if (value > 1_000_000_000) return new Date(value * 1000).toISOString();
+    return new Date(Date.now() + Math.max(Math.ceil(value), 1) * 1000).toISOString();
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return new Date(Date.now() + Math.ceil(seconds) * 1000).toISOString();
+    }
+    const timestamp = Date.parse(trimmed);
+    if (Number.isFinite(timestamp)) return new Date(timestamp).toISOString();
+  }
+
+  if (value instanceof Date) return value.toISOString();
+
+  return null;
+}
+
+function getComboRetryAfter(errorBody: unknown, headers?: Headers | null): string | null {
+  const body = errorBody && typeof errorBody === "object" ? (errorBody as Record<string, unknown>) : null;
+  const error = body?.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : null;
+  return (
+    normalizeComboRetryAfter(body?.retryAfter) ||
+    normalizeComboRetryAfter(error?.retryAfter) ||
+    normalizeComboRetryAfter(error?.reset_seconds) ||
+    normalizeComboRetryAfter(headers?.get("retry-after"))
+  );
+}
+
 function isAllAccountsRateLimitedResponse(
   status: number,
   contentType: string | null,
-  errorText: string
+  errorText: string,
+  errorBody?: unknown
 ): boolean {
+  const body = errorBody && typeof errorBody === "object" ? (errorBody as Record<string, unknown>) : null;
+  const error = body?.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : null;
+  if (status === 429) {
+    if (error?.code === "model_cooldown") return true;
+    const message = `${errorText || ""} ${typeof error?.message === "string" ? error.message : ""}`;
+    return /all (?:credentials|accounts).*(?:cooling down|rate limited)|all credentials for model/i.test(message);
+  }
   if (status !== 503) return false;
   if (!contentType?.includes("application/json")) return false;
   return ALL_ACCOUNTS_RATE_LIMITED_PATTERNS.some((p) => p.test(errorText));
@@ -1644,7 +1688,7 @@ export async function handleComboChat({
             errorBody = JSON.parse(text);
             errorText =
               errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
-            retryAfter = errorBody?.retryAfter || null;
+            retryAfter = getComboRetryAfter(errorBody, result.headers);
           }
         } catch {
           /* Clone parse failed */
@@ -1712,7 +1756,15 @@ export async function handleComboChat({
       }
 
       // Check if this is a transient error worth retrying on same model
-      const isTransient = [408, 429, 500, 502, 503, 504].includes(result.status);
+      const isTransient =
+        [408, 500, 502, 503, 504].includes(result.status) ||
+        (result.status === 429 &&
+          !isAllAccountsRateLimitedResponse(
+            result.status,
+            result.headers?.get("content-type") ?? null,
+            errorText,
+            errorBody
+          ));
       if (retry < maxRetries && isTransient) {
         continue; // Retry same model
       }
@@ -1958,7 +2010,7 @@ async function handleRoundRobinCombo({
               errorBody = JSON.parse(text);
               errorText =
                 errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
-              retryAfter = errorBody?.retryAfter || null;
+              retryAfter = getComboRetryAfter(errorBody, result.headers);
             }
           } catch {
             /* Clone parse failed */
@@ -2007,7 +2059,8 @@ async function handleRoundRobinCombo({
         const isAllAccountsRateLimited = isAllAccountsRateLimitedResponse(
           result.status,
           result.headers?.get("content-type") ?? null,
-          errorText
+          errorText,
+          errorBody
         );
 
         // Transient errors → mark in semaphore so round-robin stops stampeding this target.
@@ -2043,7 +2096,7 @@ async function handleRoundRobinCombo({
 
         // Transient error → retry same model
         const isTransient = [408, 429, 500, 502, 503, 504].includes(result.status);
-        if (retry < maxRetries && isTransient) {
+        if (retry < maxRetries && isTransient && !isAllAccountsRateLimited) {
           continue;
         }
 

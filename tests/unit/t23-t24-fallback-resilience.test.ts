@@ -180,3 +180,50 @@ test("combo bad-request fallback helper keeps generic 400s terminal", () => {
   assert.equal(shouldFallbackComboBadRequest(400, "bad request"), false);
   assert.equal(shouldFallbackComboBadRequest(422, "request blocked by Gemini API"), false);
 });
+
+test("combo falls through model cooldown without retrying the same model", async () => {
+  const calls = [];
+
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "t24-model-cooldown-no-retry",
+      strategy: "priority",
+      models: [
+        { model: "claude/claude-opus-4-7", weight: 0 },
+        { model: "claude/claude-opus-4-6", weight: 0 },
+      ],
+    },
+    handleSingleModel: async (_body, modelStr) => {
+      calls.push(modelStr);
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "All credentials for model claude-opus-4-7 are cooling down",
+              type: "rate_limit_error",
+              code: "model_cooldown",
+              model: "claude-opus-4-7",
+              reset_seconds: 40,
+            },
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "retry-after": "40",
+            },
+          }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+    isModelAvailable: () => true,
+    log: createLog(),
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ["claude/claude-opus-4-7", "claude/claude-opus-4-6"]);
+});
