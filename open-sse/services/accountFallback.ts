@@ -83,6 +83,7 @@ export const CREDITS_EXHAUSTED_SIGNALS = [
   "your credit balance is too low",
   "credits exhausted",
   "out of credits",
+  "out of extra usage",
   "payment required",
 ];
 
@@ -408,6 +409,7 @@ export function hasPerModelQuota(
   }
   if (!provider) return false;
   if (provider === "gemini") return true;
+  if (provider === "claude") return true;
   if (getPassthroughProviders().has(provider)) return true;
   if (isCompatibleProvider(provider)) return true;
   return false;

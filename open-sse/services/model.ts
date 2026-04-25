@@ -320,8 +320,7 @@ function resolveModelByProviderInference(modelId, extendedContext) {
   // FIX #73: Models like claude-haiku-4-5-20251001 sent without provider prefix
   // would incorrectly route to OpenAI. Use heuristic prefix detection first.
   if (/^claude-/i.test(modelId)) {
-    // Claude models → Anthropic provider (canonical source for Claude models)
-    return { provider: "anthropic", model: modelId, extendedContext };
+    return { provider: "claude", model: modelId, extendedContext };
   }
   if (/^gemini-/i.test(modelId) || /^gemma-/i.test(modelId)) {
     // Gemini/Gemma models → Gemini provider

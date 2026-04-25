@@ -29,9 +29,9 @@ import {
 } from "@omniroute/open-sse/services/errorClassifier.ts";
 import { getCodexModelScope } from "@omniroute/open-sse/executors/codex.ts";
 import { getProviderAlias, resolveProviderId } from "@/shared/constants/providers";
-import { isModelExcludedByConnection } from "@/domain/connectionModelRules";
 import * as log from "../utils/logger";
 import { fisherYatesShuffle, getNextFromDeckSync } from "@/shared/utils/shuffleDeck";
+import { getDbInstance } from "@/lib/db/core";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -698,9 +698,6 @@ export async function getProviderCredentials(
     // Filter out unavailable accounts and excluded connection
     const availableConnections = connections.filter((c) => {
       if (excludedConnectionIds.has(c.id)) return false;
-      if (requestedModel && isModelExcludedByConnection(requestedModel, c.providerSpecificData)) {
-        return false;
-      }
       if (!allowSuppressedConnections) {
         if (isAccountUnavailable(c.rateLimitedUntil)) return false;
         if (isTerminalConnectionStatus(c)) return false;
@@ -722,18 +719,10 @@ export async function getProviderCredentials(
       const codexScopeLimited = provider === "codex" && isCodexScopeUnavailable(c, requestedModel);
       const modelLocked =
         Boolean(requestedModel) && isModelLocked(provider, c.id, requestedModel as string);
-      const modelExcluded =
-        Boolean(requestedModel) &&
-        isModelExcludedByConnection(requestedModel as string, c.providerSpecificData);
       if (excluded || rateLimited) {
         log.debug(
           "AUTH",
           `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${rateLimited ? `rateLimited until ${c.rateLimitedUntil}` : ""}${allowSuppressedConnections && rateLimited ? " (retained for combo live test)" : ""}`
-        );
-      } else if (modelExcluded) {
-        log.debug(
-          "AUTH",
-          `  → ${c.id?.slice(0, 8)} | excluded by per-account model rule for ${requestedModel}`
         );
       } else if (terminalStatus) {
         log.debug(
@@ -1033,6 +1022,67 @@ export async function getProviderCredentials(
       const ids = orderedConnections.map((c) => c.id);
       const selectedId = getNextFromDeckSync(`conn:${provider}`, ids);
       connection = orderedConnections.find((c) => c.id === selectedId) || orderedConnections[0];
+    } else if (strategy === "least-tokens") {
+      try {
+        const db = getDbInstance();
+        const ids = orderedConnections.map((c) => c.id);
+        const placeholders = ids.map(() => "?").join(",");
+        const rows = db
+          .prepare(
+            `SELECT connection_id, COALESCE(SUM(tokens_input + tokens_output), 0) AS total_tokens
+             FROM usage_history
+             WHERE connection_id IN (${placeholders}) AND success = 1
+             GROUP BY connection_id`
+          )
+          .all(ids) as Array<{ connection_id: string; total_tokens: number }>;
+        const usageMap = new Map(rows.map((r) => [r.connection_id, r.total_tokens]));
+        const sorted = [...orderedConnections].sort(
+          (a, b) => (usageMap.get(a.id) ?? 0) - (usageMap.get(b.id) ?? 0)
+        );
+        connection = sorted[0];
+        log.debug(
+          "AUTH",
+          `${provider} least-tokens: picked ${connection.id?.slice(0, 8)} (${usageMap.get(connection.id) ?? 0} tokens) from ${orderedConnections.length} available [${orderedConnections.map(c => `${c.id.slice(0,8)}:${usageMap.get(c.id) ?? 0}`).join(", ")}]`
+        );
+      } catch (e: any) {
+        connection = orderedConnections[0];
+        log.warn("AUTH", `${provider} least-tokens: DB query failed (${e?.message}), falling back to first`);
+      }
+    } else if (strategy === "most-quota-remaining") {
+      try {
+        const db = getDbInstance();
+        const ids = orderedConnections.map((c) => c.id);
+        const placeholders = ids.map(() => "?").join(",");
+        const rows = db
+          .prepare(
+            `SELECT connection_id, window_key, remaining_percentage, created_at
+             FROM quota_snapshots
+             WHERE connection_id IN (${placeholders})
+               AND id IN (
+                 SELECT MAX(id) FROM quota_snapshots
+                 WHERE connection_id IN (${placeholders})
+                 GROUP BY connection_id, window_key
+               )`
+          )
+          .all(ids, ids) as Array<{ connection_id: string; window_key: string; remaining_percentage: number; created_at: string }>;
+        const minByConn = new Map<string, number>();
+        for (const r of rows) {
+          const cur = minByConn.get(r.connection_id);
+          const pct = typeof r.remaining_percentage === "number" ? r.remaining_percentage : 100;
+          if (cur === undefined || pct < cur) minByConn.set(r.connection_id, pct);
+        }
+        const sorted = [...orderedConnections].sort(
+          (a, b) => (minByConn.get(b.id) ?? 100) - (minByConn.get(a.id) ?? 100)
+        );
+        connection = sorted[0];
+        log.debug(
+          "AUTH",
+          `${provider} most-quota-remaining: picked ${connection.id?.slice(0, 8)} (${minByConn.get(connection.id) ?? 100}% min remaining) from ${orderedConnections.length} available [${orderedConnections.map(c => `${c.id.slice(0,8)}:${minByConn.get(c.id) ?? 100}%`).join(", ")}]`
+        );
+      } catch (e: any) {
+        connection = orderedConnections[0];
+        log.warn("AUTH", `${provider} most-quota-remaining: DB query failed (${e?.message}), falling back to first`);
+      }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
       connection = orderedConnections[0];
@@ -1449,17 +1499,13 @@ export function extractApiKey(request: Request) {
 }
 
 /**
- * Validate API key (optional - for local use can skip).
- * Feature #1350: Supports OMNIROUTE_API_KEY / ROUTER_API_KEY env vars as
- * persistent passthrough keys that always validate, surviving Docker
- * restarts and backup restores without DB dependency.
+ * Validate API key (optional - for local use can skip)
  */
 export async function isValidApiKey(apiKey: string) {
   if (!apiKey) return false;
-
-  // Persistent env-var key — always valid regardless of DB state (#1350)
-  const envKey = process.env.OMNIROUTE_API_KEY || process.env.ROUTER_API_KEY;
-  if (envKey && apiKey === envKey) return true;
-
   return await validateApiKey(apiKey);
 }
+
+/**
+ * Get database instance
+ */

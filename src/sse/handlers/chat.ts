@@ -39,6 +39,7 @@ import {
   safeLogEvents,
   withSessionHeader,
 } from "./chatHelpers";
+import { maybeDowngradeOpus } from "../services/quotaAwareDowngrade";
 
 // Pipeline integration — wired modules
 import { getCircuitBreaker } from "../../shared/utils/circuitBreaker";
@@ -270,6 +271,17 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
   // Detect the semantic task type and optionally route to the optimal model
   let resolvedModelStr = modelStr;
   let taskRouteInfo: { taskType: string; wasRouted: boolean } | null = null;
+
+  // Quota-aware Opus → Sonnet downgrade. Probabilistic, only triggers when
+  // opus weekly quota gets tight and sonnet has headroom.
+  {
+    const dg = maybeDowngradeOpus(resolvedModelStr);
+    if (dg.newModel) {
+      resolvedModelStr = dg.newModel;
+      body = { ...body, model: dg.newModel };
+    }
+  }
+
   if (getTaskRoutingConfig().enabled) {
     telemetry.startPhase("task-route");
     const tr = applyTaskAwareRouting(modelStr, body);
