@@ -17,7 +17,19 @@ for (const strategy of SETTINGS_FALLBACK_STRATEGY_VALUES) {
 }
 
 test("settings schemas reject combo-only strategies as account fallback strategies", () => {
-  for (const strategy of ["auto", "lkgp", "context-optimized"]) {
+  for (const strategy of [
+    "priority",
+    "weighted",
+    "fill-first",
+    "round-robin",
+    "random",
+    "least-used",
+    "cost-optimized",
+    "strict-random",
+    "auto",
+    "lkgp",
+    "context-optimized",
+  ]) {
     assert.equal(settingsRouteSchema.safeParse({ fallbackStrategy: strategy }).success, false);
     assert.equal(sharedSettingsSchema.safeParse({ fallbackStrategy: strategy }).success, false);
   }

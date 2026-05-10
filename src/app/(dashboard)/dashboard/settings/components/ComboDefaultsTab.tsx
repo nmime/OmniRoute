@@ -80,7 +80,9 @@ export default function ComboDefaultsTab() {
   });
   const t = useTranslations("settings");
   const tc = useTranslations("common");
-  const strategyOptions = ROUTING_STRATEGIES.map((strategy) => ({
+  const strategyOptions = ROUTING_STRATEGIES.filter((strategy) =>
+    ACCOUNT_FALLBACK_STRATEGIES.has(strategy.value)
+  ).map((strategy) => ({
     value: strategy.value,
     label: translateOrFallback(
       t,

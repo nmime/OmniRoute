@@ -5,15 +5,13 @@ const { resolveComboConfig, getDefaultComboConfig } =
   await import("../../open-sse/services/comboConfig.ts");
 const { createComboSchema, updateComboDefaultsSchema } =
   await import("../../src/shared/validation/schemas.ts");
-const { normalizeRoutingStrategy } =
-  await import("../../src/shared/constants/routingStrategies.ts");
 
 test("getDefaultComboConfig returns a fresh copy of the defaults", () => {
   const first = getDefaultComboConfig();
   const second = getDefaultComboConfig();
 
   assert.notEqual(first, second);
-  assert.equal(first.strategy, "reset-aware");
+  assert.equal(first.strategy, "priority");
   assert.equal(first.maxRetries, 1);
   assert.equal(first.retryDelayMs, 2000);
   assert.equal(first.fallbackDelayMs, 0);
@@ -24,7 +22,7 @@ test("getDefaultComboConfig returns a fresh copy of the defaults", () => {
   assert.deepEqual(first.handoffProviders, ["codex"]);
 
   first.strategy = "weighted";
-  assert.equal(second.strategy, "reset-aware");
+  assert.equal(second.strategy, "priority");
 });
 
 test("resolveComboConfig applies the full cascade from defaults to combo overrides", () => {
@@ -58,13 +56,6 @@ test("resolveComboConfig applies the full cascade from defaults to combo overrid
   assert.ok(!("healthCheckEnabled" in result));
 });
 
-test("normalizeRoutingStrategy maps legacy quota-balancing aliases to reset-aware", () => {
-  assert.equal(normalizeRoutingStrategy("usage"), "reset-aware");
-  assert.equal(normalizeRoutingStrategy("least-tokens"), "reset-aware");
-  assert.equal(normalizeRoutingStrategy("most-quota-remaining"), "reset-aware");
-  assert.equal(normalizeRoutingStrategy(null), "reset-aware");
-});
-
 test("resolveComboConfig ignores null, undefined, and legacy resilience overrides", () => {
   const result = resolveComboConfig(
     {
@@ -92,7 +83,7 @@ test("resolveComboConfig ignores null, undefined, and legacy resilience override
   assert.equal(result.queueTimeoutMs, 15000);
   assert.equal(result.concurrencyPerModel, 9);
   assert.equal(result.trackMetrics, false);
-  assert.equal(result.strategy, "reset-aware");
+  assert.equal(result.strategy, "priority");
 });
 
 test("updateComboDefaultsSchema accepts arbitrarily large timeout defaults and provider overrides", () => {

@@ -28,30 +28,18 @@ export const AUTO_ROUTING_STRATEGY_VALUES = [
 
 export type AutoRoutingStrategyValue = (typeof AUTO_ROUTING_STRATEGY_VALUES)[number];
 
-export const ACCOUNT_FALLBACK_STRATEGY_VALUES = [
-  "priority",
-  "weighted",
-  "fill-first",
-  "round-robin",
-  "p2c",
-  "random",
-  "least-used",
-  "cost-optimized",
-  "strict-random",
-] as const;
+export const ACCOUNT_FALLBACK_STRATEGY_VALUES = ["p2c"] as const;
 
 export type AccountFallbackStrategyValue = (typeof ACCOUNT_FALLBACK_STRATEGY_VALUES)[number];
 
 export function normalizeRoutingStrategy(value: unknown): RoutingStrategyValue {
-  if (typeof value !== "string") return "reset-aware";
+  if (typeof value !== "string") return "priority";
   const normalized = value.trim().toLowerCase();
-  if (normalized === "usage") return "reset-aware";
-  if (normalized === "least-tokens") return "reset-aware";
-  if (normalized === "most-quota-remaining") return "reset-aware";
+  if (normalized === "usage") return "least-used";
   if (normalized === "context") return "context-optimized";
   return (ROUTING_STRATEGY_VALUES as readonly string[]).includes(normalized)
     ? (normalized as RoutingStrategyValue)
-    : "reset-aware";
+    : "priority";
 }
 
 type RoutingStrategyOption = {

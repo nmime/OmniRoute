@@ -1461,7 +1461,7 @@ export async function handleComboChat({
   signal,
   apiKeyAllowedConnections = null,
 }) {
-  const strategy = normalizeRoutingStrategy(combo.strategy || "reset-aware");
+  const strategy = normalizeRoutingStrategy(combo.strategy || "priority");
   const relayConfig =
     strategy === "context-relay" ? resolveContextRelayConfig(relayOptions?.config || null) : null;
 

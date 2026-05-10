@@ -86,6 +86,7 @@ export async function getSettings() {
     tailscaleEnabled: false,
     tailscaleUrl: "",
     stickyRoundRobinLimit: 3,
+    fallbackStrategy: "p2c",
     requestRetry: 3,
     maxRetryIntervalSec: 30,
     antigravitySignatureCacheMode: "enabled",

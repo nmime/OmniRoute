@@ -6,7 +6,7 @@
  */
 
 const DEFAULT_COMBO_CONFIG = {
-  strategy: "reset-aware",
+  strategy: "priority",
   maxRetries: 1,
   retryDelayMs: 2000,
   fallbackDelayMs: 0,

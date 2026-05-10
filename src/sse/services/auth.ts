@@ -1100,7 +1100,7 @@ export async function getProviderCredentials(
     const orderedConnections = withQuota;
 
     const settings = await getSettings();
-    const strategy = settings.fallbackStrategy || "fill-first";
+    const strategy = settings.fallbackStrategy || "p2c";
 
     let connection;
     const affinityConnection = await selectSessionAffinityConnection(
