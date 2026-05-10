@@ -43,13 +43,15 @@ export const ACCOUNT_FALLBACK_STRATEGY_VALUES = [
 export type AccountFallbackStrategyValue = (typeof ACCOUNT_FALLBACK_STRATEGY_VALUES)[number];
 
 export function normalizeRoutingStrategy(value: unknown): RoutingStrategyValue {
-  if (typeof value !== "string") return "priority";
+  if (typeof value !== "string") return "reset-aware";
   const normalized = value.trim().toLowerCase();
-  if (normalized === "usage") return "least-used";
+  if (normalized === "usage") return "reset-aware";
+  if (normalized === "least-tokens") return "reset-aware";
+  if (normalized === "most-quota-remaining") return "reset-aware";
   if (normalized === "context") return "context-optimized";
   return (ROUTING_STRATEGY_VALUES as readonly string[]).includes(normalized)
     ? (normalized as RoutingStrategyValue)
-    : "priority";
+    : "reset-aware";
 }
 
 type RoutingStrategyOption = {

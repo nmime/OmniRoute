@@ -46,7 +46,7 @@ export async function GET(request: Request) {
         Object.keys(comboDefaults).length > 0
           ? comboDefaults
           : {
-              strategy: "priority",
+              strategy: "reset-aware",
               maxRetries: 1,
               retryDelayMs: 2000,
               fallbackDelayMs: 0,
