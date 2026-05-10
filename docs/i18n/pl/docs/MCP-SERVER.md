@@ -1,72 +1,87 @@
 # OmniRoute MCP Server Documentation (Polski)
 
-🌐 **Languages:** 🇺🇸 [English](../../../../docs/MCP-SERVER.md) · 🇪🇸 [es](../../es/docs/MCP-SERVER.md) · 🇫🇷 [fr](../../fr/docs/MCP-SERVER.md) · 🇩🇪 [de](../../de/docs/MCP-SERVER.md) · 🇮🇹 [it](../../it/docs/MCP-SERVER.md) · 🇷🇺 [ru](../../ru/docs/MCP-SERVER.md) · 🇨🇳 [zh-CN](../../zh-CN/docs/MCP-SERVER.md) · 🇯🇵 [ja](../../ja/docs/MCP-SERVER.md) · 🇰🇷 [ko](../../ko/docs/MCP-SERVER.md) · 🇸🇦 [ar](../../ar/docs/MCP-SERVER.md) · 🇮🇳 [hi](../../hi/docs/MCP-SERVER.md) · 🇮🇳 [in](../../in/docs/MCP-SERVER.md) · 🇹🇭 [th](../../th/docs/MCP-SERVER.md) · 🇻🇳 [vi](../../vi/docs/MCP-SERVER.md) · 🇮🇩 [id](../../id/docs/MCP-SERVER.md) · 🇲🇾 [ms](../../ms/docs/MCP-SERVER.md) · 🇳🇱 [nl](../../nl/docs/MCP-SERVER.md) · 🇵🇱 [pl](../../pl/docs/MCP-SERVER.md) · 🇸🇪 [sv](../../sv/docs/MCP-SERVER.md) · 🇳🇴 [no](../../no/docs/MCP-SERVER.md) · 🇩🇰 [da](../../da/docs/MCP-SERVER.md) · 🇫🇮 [fi](../../fi/docs/MCP-SERVER.md) · 🇵🇹 [pt](../../pt/docs/MCP-SERVER.md) · 🇷🇴 [ro](../../ro/docs/MCP-SERVER.md) · 🇭🇺 [hu](../../hu/docs/MCP-SERVER.md) · 🇧🇬 [bg](../../bg/docs/MCP-SERVER.md) · 🇸🇰 [sk](../../sk/docs/MCP-SERVER.md) · 🇺🇦 [uk-UA](../../uk-UA/docs/MCP-SERVER.md) · 🇮🇱 [he](../../he/docs/MCP-SERVER.md) · 🇵🇭 [phi](../../phi/docs/MCP-SERVER.md) · 🇧🇷 [pt-BR](../../pt-BR/docs/MCP-SERVER.md) · 🇨🇿 [cs](../../cs/docs/MCP-SERVER.md) · 🇹🇷 [tr](../../tr/docs/MCP-SERVER.md)
+🌐 **Languages:** 🇺🇸 [English](../../../../docs/MCP-SERVER.md) · 🇸🇦 [ar](../../ar/docs/MCP-SERVER.md) · 🇧🇬 [bg](../../bg/docs/MCP-SERVER.md) · 🇧🇩 [bn](../../bn/docs/MCP-SERVER.md) · 🇨🇿 [cs](../../cs/docs/MCP-SERVER.md) · 🇩🇰 [da](../../da/docs/MCP-SERVER.md) · 🇩🇪 [de](../../de/docs/MCP-SERVER.md) · 🇪🇸 [es](../../es/docs/MCP-SERVER.md) · 🇮🇷 [fa](../../fa/docs/MCP-SERVER.md) · 🇫🇮 [fi](../../fi/docs/MCP-SERVER.md) · 🇫🇷 [fr](../../fr/docs/MCP-SERVER.md) · 🇮🇳 [gu](../../gu/docs/MCP-SERVER.md) · 🇮🇱 [he](../../he/docs/MCP-SERVER.md) · 🇮🇳 [hi](../../hi/docs/MCP-SERVER.md) · 🇭🇺 [hu](../../hu/docs/MCP-SERVER.md) · 🇮🇩 [id](../../id/docs/MCP-SERVER.md) · 🇮🇹 [it](../../it/docs/MCP-SERVER.md) · 🇯🇵 [ja](../../ja/docs/MCP-SERVER.md) · 🇰🇷 [ko](../../ko/docs/MCP-SERVER.md) · 🇮🇳 [mr](../../mr/docs/MCP-SERVER.md) · 🇲🇾 [ms](../../ms/docs/MCP-SERVER.md) · 🇳🇱 [nl](../../nl/docs/MCP-SERVER.md) · 🇳🇴 [no](../../no/docs/MCP-SERVER.md) · 🇵🇭 [phi](../../phi/docs/MCP-SERVER.md) · 🇵🇱 [pl](../../pl/docs/MCP-SERVER.md) · 🇵🇹 [pt](../../pt/docs/MCP-SERVER.md) · 🇧🇷 [pt-BR](../../pt-BR/docs/MCP-SERVER.md) · 🇷🇴 [ro](../../ro/docs/MCP-SERVER.md) · 🇷🇺 [ru](../../ru/docs/MCP-SERVER.md) · 🇸🇰 [sk](../../sk/docs/MCP-SERVER.md) · 🇸🇪 [sv](../../sv/docs/MCP-SERVER.md) · 🇰🇪 [sw](../../sw/docs/MCP-SERVER.md) · 🇮🇳 [ta](../../ta/docs/MCP-SERVER.md) · 🇮🇳 [te](../../te/docs/MCP-SERVER.md) · 🇹🇭 [th](../../th/docs/MCP-SERVER.md) · 🇹🇷 [tr](../../tr/docs/MCP-SERVER.md) · 🇺🇦 [uk-UA](../../uk-UA/docs/MCP-SERVER.md) · 🇵🇰 [ur](../../ur/docs/MCP-SERVER.md) · 🇻🇳 [vi](../../vi/docs/MCP-SERVER.md) · 🇨🇳 [zh-CN](../../zh-CN/docs/MCP-SERVER.md)
 
 ---
 
-> Serwer Model Context Protocol z 16 inteligentnymi narzędziami## Zainstaluj
+> Model Context Protocol server with 16 intelligent tools
 
-OmniRoute MCP jest wbudowany. Zacznij od:```bash
+## Zainstaluj
+
+OmniRoute MCP is built-in. Start it with:
+
+```bash
 omniroute --mcp
+```
 
-````
+Or via the open-sse transport:
 
-Lub poprzez transport open-sse:```bash
+```bash
 # HTTP streamable transport (port 20130)
 omniroute --dev  # MCP auto-starts on /mcp endpoint
-````
+```
 
 ## IDE Configuration
 
-Zobacz [Konfiguracje IDE](integrations/ide-configs.md) dla konfiguracji antygrawitacji, kursora, drugiego pilota i Claude Desktop.---
+See [IDE Configs](integrations/ide-configs.md) for Antigravity, Cursor, Copilot, and Claude Desktop setup.
+
+---
 
 ## Essential Tools (8)
 
-| Narzędzie                           | Opis                                                    |
-| :---------------------------------- | :------------------------------------------------------ | --------------------- |
-| `omniroute_get_health`              | Stan bramy, wyłączniki automatyczne, czas pracy         |
-| `kombinacje listy_omniroute`        | Wszystkie skonfigurowane kombinacje z modelami          |
-| `omniroute_get_combo_metrics`       | Wskaźniki wydajności dla konkretnej kombinacji          |
-| `kombinacja_przełącznika_omniroute` | Przełącz aktywną kombinację według identyfikatora/nazwy |
-| `omniroute_check_quota`             | Stan limitu na dostawcę lub wszystkich                  |
-| `omniroute_route_żądanie`           | Wyślij zakończenie czatu poprzez OmniRoute              |
-| `raport_kosztów_omniroute`          | Analiza kosztów za okres czasu                          |
-| `omniroute_list_modeli_katalog`     | Pełny katalog modeli z możliwościami                    | ## Advanced Tools (8) |
+| Tool                            | Description                              |
+| :------------------------------ | :--------------------------------------- |
+| `omniroute_get_health`          | Gateway health, circuit breakers, uptime |
+| `omniroute_list_combos`         | All configured combos with models        |
+| `omniroute_get_combo_metrics`   | Performance metrics for a specific combo |
+| `omniroute_switch_combo`        | Switch active combo by ID/name           |
+| `omniroute_check_quota`         | Quota status per provider or all         |
+| `omniroute_route_request`       | Send a chat completion through OmniRoute |
+| `omniroute_cost_report`         | Cost analytics for a time period         |
+| `omniroute_list_models_catalog` | Full model catalog with capabilities     |
 
-| Narzędzie                          | Opis                                                                |
-| :--------------------------------- | :------------------------------------------------------------------ | ----------------- |
-| `omniroute_symulacja_trasy`        | Symulacja routingu na sucho z drzewem awaryjnym                     |
-| `omniroute_set_budget_guard`       | Budżet sesji z działaniami obniżającymi/blokującymi/alarmowymi      |
-| `omniroute_set_resilience_profile` | Zastosuj ustawienie wstępne konserwatywne/zrównoważone/agresywne    |
-| `kombinacja_testowa_omniroute`     | Przetestuj na żywo wszystkie modele w zestawie na prawdziwe żądanie |
-| `omniroute_get_provider_metrics`   | Szczegółowe wskaźniki dla jednego dostawcy                          |
-| `omniroute_best_combo_for_task`    | Zalecenia dotyczące sprawności zadaniowej z alternatywami           |
-| `omniroute_explain_route`          | Wyjaśnij podjętą wcześniej decyzję o routingu                       |
-| `omniroute_get_session_snapshot`   | Pełny stan sesji: koszty, tokeny, błędy                             | ## Authentication |
+## Advanced Tools (8)
 
-Narzędzia MCP są uwierzytelniane poprzez zakresy kluczy API. Każde narzędzie wymaga określonych zakresów:
+| Tool                               | Description                                                 |
+| :--------------------------------- | :---------------------------------------------------------- |
+| `omniroute_simulate_route`         | Dry-run routing simulation with fallback tree               |
+| `omniroute_set_budget_guard`       | Session budget with degrade/block/alert actions             |
+| `omniroute_set_resilience_profile` | Apply conservative/balanced/aggressive preset               |
+| `omniroute_test_combo`             | Live-test all models in a combo via a real upstream request |
+| `omniroute_get_provider_metrics`   | Detailed metrics for one provider                           |
+| `omniroute_best_combo_for_task`    | Task-fitness recommendation with alternatives               |
+| `omniroute_explain_route`          | Explain a past routing decision                             |
+| `omniroute_get_session_snapshot`   | Full session state: costs, tokens, errors                   |
 
-| Zakres                | Narzędzia                                            |
-| :-------------------- | :--------------------------------------------------- | ---------------- |
-| `czytaj:zdrowie`      | get_health, get_provider_metrics                     |
-| `czytaj:kombinacje`   | list_combos, get_combo_metrics                       |
-| `napisz: kombinacje`  | przełącznik_combo                                    |
-| `czytaj:kwota`        | limit_kontrolny                                      |
-| `wpisz:trasa`         | żądanie_trasy, symulacja_trasy, test_combo           |
-| `czytaj: użycie`      | raport_kosztów, get_session_snapshot, wyjaśnij_trasę |
-| `zapis: konfiguracja` | set_budget_guard, set_resilience_profile             |
-| `czytaj:modele`       | lista_modeli_katalog, najlepsza_kombo_do_zadania     | ## Audit Logging |
+## Authentication
 
-Każde wywołanie narzędzia jest rejestrowane w `mcp_tool_audit` za pomocą:
+MCP tools are authenticated via API key scopes. Each tool requires specific scopes:
 
-- Nazwa narzędzia, argumenty, wynik
-- Czas trwania (ms), sukces/porażka
-- Hash klucza API, znacznik czasu## Files
+| Scope          | Tools                                            |
+| :------------- | :----------------------------------------------- |
+| `read:health`  | get_health, get_provider_metrics                 |
+| `read:combos`  | list_combos, get_combo_metrics                   |
+| `write:combos` | switch_combo                                     |
+| `read:quota`   | check_quota                                      |
+| `write:route`  | route_request, simulate_route, test_combo        |
+| `read:usage`   | cost_report, get_session_snapshot, explain_route |
+| `write:config` | set_budget_guard, set_resilience_profile         |
+| `read:models`  | list_models_catalog, best_combo_for_task         |
 
-| Plik                                         | Cel                                              |
-| :------------------------------------------- | :----------------------------------------------- |
-| `open-sse/mcp-server/server.ts`              | Utworzenie serwera MCP + 16 rejestracji narzędzi |
-| `open-sse/mcp-server/transport.ts`           | Stdio + transport HTTP                           |
-| `open-sse/mcp-server/auth.ts`                | Klucz API + walidacja zakresu                    |
-| `open-sse/mcp-server/audit.ts`               | Rejestrowanie audytu wywołań narzędzia           |
-| `open-sse/mcp-server/tools/advancedTools.ts` | 8 zaawansowanych modułów obsługi narzędzi        |
+## Audit Logging
+
+Every tool call is logged to `mcp_tool_audit` with:
+
+- Tool name, arguments, result
+- Duration (ms), success/failure
+- API key hash, timestamp
+
+## Files
+
+| File                                         | Purpose                                     |
+| :------------------------------------------- | :------------------------------------------ |
+| `open-sse/mcp-server/server.ts`              | MCP server creation + 16 tool registrations |
+| `open-sse/mcp-server/transport.ts`           | Stdio + HTTP transport                      |
+| `open-sse/mcp-server/auth.ts`                | API key + scope validation                  |
+| `open-sse/mcp-server/audit.ts`               | Tool call audit logging                     |
+| `open-sse/mcp-server/tools/advancedTools.ts` | 8 advanced tool handlers                    |

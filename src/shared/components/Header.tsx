@@ -3,7 +3,6 @@
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import PropTypes from "prop-types";
 import ThemeToggle from "./ThemeToggle";
 import TokenHealthBadge from "./TokenHealthBadge";
 import DegradationBadge from "./DegradationBadge";
@@ -21,6 +20,11 @@ import {
 import { useIsElectron } from "@/shared/hooks/useElectron";
 
 const isE2EMode = process.env.NEXT_PUBLIC_OMNIROUTE_E2E_MODE === "1";
+
+type HeaderProps = {
+  onMenuClick?: () => void;
+  showMenuButton?: boolean;
+};
 
 function usePageInfo(pathname: string | null): {
   title: string;
@@ -120,14 +124,16 @@ function usePageInfo(pathname: string | null): {
   return { title: "", description: "", breadcrumbs: [] };
 }
 
-export default function Header({ onMenuClick, showMenuButton = true }) {
+export default function Header({ onMenuClick, showMenuButton = true }: HeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const isElectron = useIsElectron();
   const t = useTranslations("header");
   const { title, description, breadcrumbs } = usePageInfo(pathname);
   const isMacElectron =
-    isElectron && typeof window !== "undefined" && window.electronAPI?.platform === "darwin";
+    isElectron &&
+    typeof window !== "undefined" &&
+    (window as any).electronAPI?.platform === "darwin";
 
   const handleLogout = async () => {
     try {
@@ -143,11 +149,9 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
 
   return (
     <header
-      className="sticky top-0 z-10 flex items-center justify-between border-b border-black/5 bg-bg/80 px-8 py-5 backdrop-blur-xl dark:border-white/5"
+      className="sticky top-0 z-10 flex items-center justify-between border-b border-black/5 bg-bg px-8 py-5 dark:border-white/5"
       style={{
-        paddingTop: isMacElectron
-          ? "calc(1.25rem + var(--desktop-safe-top))"
-          : undefined,
+        paddingTop: isMacElectron ? "calc(1.25rem + var(--desktop-safe-top))" : undefined,
       }}
     >
       {/* Mobile menu button */}
@@ -241,8 +245,3 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
     </header>
   );
 }
-
-Header.propTypes = {
-  onMenuClick: PropTypes.func,
-  showMenuButton: PropTypes.bool,
-};

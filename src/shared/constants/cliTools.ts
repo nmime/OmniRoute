@@ -1,4 +1,8 @@
 // CLI Tools configuration
+import { getClaudeCodeDefaultModels } from "@omniroute/open-sse/config/providerRegistry";
+
+const _cc = getClaudeCodeDefaultModels();
+
 export const CLI_TOOLS = {
   claude: {
     id: "claude",
@@ -20,32 +24,47 @@ export const CLI_TOOLS = {
     defaultCommand: "claude",
     defaultModels: [
       {
+        id: "model",
+        name: "Default Model",
+        alias: "model",
+        envKey: "ANTHROPIC_MODEL",
+        defaultValue: _cc.sonnet ? `cc/${_cc.sonnet}` : "cc/claude-sonnet-4-5-20250929",
+        isTopLevel: true,
+      },
+      {
+        id: "smallFast",
+        name: "Small Fast Model",
+        alias: "smallFast",
+        envKey: "ANTHROPIC_SMALL_FAST_MODEL",
+        defaultValue: _cc.haiku ? `cc/${_cc.haiku}` : "cc/claude-haiku-4-5-20251001",
+        isTopLevel: true,
+      },
+      {
         id: "opus",
         name: "Claude Opus",
         alias: "opus",
         envKey: "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        defaultValue: "cc/claude-opus-4-5-20251101",
+        defaultValue: _cc.opus ? `cc/${_cc.opus}` : "cc/claude-opus-4-5-20251101",
       },
       {
         id: "sonnet",
         name: "Claude Sonnet",
         alias: "sonnet",
         envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        defaultValue: "cc/claude-sonnet-4-5-20250929",
+        defaultValue: _cc.sonnet ? `cc/${_cc.sonnet}` : "cc/claude-sonnet-4-5-20250929",
       },
       {
         id: "haiku",
         name: "Claude Haiku",
         alias: "haiku",
         envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        defaultValue: "cc/claude-haiku-4-5-20251001",
+        defaultValue: _cc.haiku ? `cc/${_cc.haiku}` : "cc/claude-haiku-4-5-20251001",
       },
     ],
   },
   codex: {
     id: "codex",
     name: "OpenAI Codex CLI",
-    image: "/providers/codex.png",
     color: "#10A37F",
     description: "OpenAI Codex CLI",
     docsUrl: "https://github.com/openai/codex",
@@ -55,7 +74,7 @@ export const CLI_TOOLS = {
   droid: {
     id: "droid",
     name: "Factory Droid",
-    image: "/providers/droid.png",
+    image: "/providers/droid.svg",
     color: "#00D4FF",
     description: "Factory Droid AI Assistant",
     docsUrl: "/docs?section=cli-tools&tool=droid",
@@ -101,7 +120,6 @@ export const CLI_TOOLS = {
   windsurf: {
     id: "windsurf",
     name: "Windsurf",
-    image: "/providers/windsurf.svg",
     color: "#4A90E2",
     description: "Windsurf AI-first IDE by Codeium",
     docsUrl: "https://windsurf.com/",
@@ -131,7 +149,6 @@ export const CLI_TOOLS = {
   cline: {
     id: "cline",
     name: "Cline",
-    image: "/providers/cline.png",
     color: "#00D1B2",
     description: "Cline AI Coding Assistant CLI",
     docsUrl: "https://docs.cline.bot/",
@@ -141,7 +158,7 @@ export const CLI_TOOLS = {
   kilo: {
     id: "kilo",
     name: "Kilo Code",
-    image: "/providers/kilocode.png",
+    image: "/providers/kilocode.svg",
     color: "#FF6B6B",
     description: "Kilo Code AI Assistant CLI",
     docsUrl: "/docs?section=cli-tools&tool=kilocode",
@@ -180,7 +197,6 @@ export const CLI_TOOLS = {
   antigravity: {
     id: "antigravity",
     name: "Antigravity",
-    image: "/providers/antigravity.png",
     color: "#4285F4",
     description: "Google Antigravity IDE with MITM",
     docsUrl: "/docs?section=cli-tools&tool=antigravity",
@@ -222,13 +238,17 @@ export const CLI_TOOLS = {
   opencode: {
     id: "opencode",
     name: "OpenCode",
-    image: "/providers/opencode.png",
+    imageLight: "/providers/opencode-light.svg",
+    imageDark: "/providers/opencode-dark.svg",
     icon: "terminal",
     color: "#FF6B35",
     description: "OpenCode AI coding agent (Terminal)",
     docsUrl: "/docs?section=cli-tools&tool=opencode",
     configType: "guide",
     defaultCommand: "opencode",
+    modelSelectionMode: "multiple",
+    hideComboModels: true,
+    previewConfigMode: "opencode",
     notes: [
       {
         type: "warning",
@@ -253,27 +273,111 @@ export const CLI_TOOLS = {
     codeBlock: {
       language: "json",
       code: `{
-  "providers": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
     "omniroute": {
+      "npm": "@ai-sdk/openai-compatible",
       "name": "OmniRoute",
-      "api": "openai",
-      "baseURL": "{{baseUrl}}",
-      "apiKey": "{{apiKey}}",
-      "models": [
-        "{{model}}",
-        "claude-sonnet-4-5-thinking",
-        "gemini-3.1-pro-high",
-        "gemini-3-flash"
-      ]
+      "options": {
+        "baseURL": "{{baseUrl}}",
+        "apiKey": "{{apiKey}}"
+      },
+      "models": {
+        "{{model}}": { "name": "{{model}}" },
+        "claude-sonnet-4-5-thinking": { "name": "claude-sonnet-4-5-thinking" },
+        "gemini-3.1-pro-high": { "name": "gemini-3.1-pro-high" },
+        "gemini-3-flash": { "name": "gemini-3-flash" }
+      }
     }
   }
 }`,
     },
   },
+  hermes: {
+    id: "hermes",
+    name: "Hermes",
+    icon: "terminal",
+    color: "#8B5CF6",
+    description: "Hermes coding agent quick configuration",
+    docsUrl: "/docs?section=cli-tools&tool=hermes",
+    configType: "guide",
+    defaultCommand: "hermes",
+    guideSteps: [
+      {
+        step: 1,
+        title: "Open Hermes Config",
+        desc: "Open your Hermes configuration file or create one if this is the first run.",
+      },
+      { step: 2, title: "API Key", type: "apiKeySelector" },
+      { step: 3, title: "Base URL", value: "{{baseUrl}}", copyable: true },
+      { step: 4, title: "Select Model", type: "modelSelector" },
+      {
+        step: 5,
+        title: "Save Provider Block",
+        desc: "Use the JSON block below as the OpenAI-compatible provider definition for OmniRoute.",
+      },
+    ],
+    codeBlock: {
+      language: "json",
+      code: `{
+  "provider": {
+    "type": "openai",
+    "baseURL": "{{baseUrl}}",
+    "apiKey": "{{apiKey}}",
+    "model": "{{model}}"
+  }
+}`,
+    },
+  },
+  amp: {
+    id: "amp",
+    name: "Amp CLI",
+    icon: "terminal",
+    color: "#F97316",
+    description: "Sourcegraph Amp coding assistant CLI",
+    docsUrl: "/docs?section=cli-tools&tool=amp",
+    configType: "guide",
+    defaultCommand: "amp",
+    modelAliases: ["g25p", "g25f", "cs45", "g54"],
+    notes: [
+      {
+        type: "info",
+        text: "Use OmniRoute model aliases to keep Amp shorthand mappings stable across provider updates.",
+      },
+      {
+        type: "warning",
+        text: "Suggested shorthand examples: g25p → gemini/gemini-2.5-pro, g25f → gemini/gemini-2.5-flash, cs45 → cc/claude-sonnet-4-5-20250929.",
+      },
+    ],
+    guideSteps: [
+      {
+        step: 1,
+        title: "Install Amp",
+        desc: "Install the Amp CLI using the package manager supported by your environment.",
+      },
+      { step: 2, title: "API Key", type: "apiKeySelector" },
+      { step: 3, title: "Base URL", value: "{{baseUrl}}", copyable: true },
+      { step: 4, title: "Select Model", type: "modelSelector" },
+      {
+        step: 5,
+        title: "Add Shorthands",
+        desc: "Map Amp shorthand names such as g25p or cs45 to OmniRoute aliases in your local config.",
+      },
+    ],
+    codeBlock: {
+      language: "bash",
+      code: `export OPENAI_API_KEY="{{apiKey}}"
+export OPENAI_BASE_URL="{{baseUrl}}"
+amp --model "{{model}}"
+# Example shorthand aliases you can map locally:
+# g25p -> gemini/gemini-2.5-pro
+# cs45 -> cc/claude-sonnet-4-5-20250929`,
+    },
+  },
   kiro: {
     id: "kiro",
     name: "Kiro AI",
-    image: "/providers/kiro.png",
+    image: "/providers/kiro.svg",
     icon: "psychology_alt",
     color: "#FF6B35",
     description: "Amazon Kiro — AI-powered IDE with MITM",
@@ -291,60 +395,135 @@ export const CLI_TOOLS = {
     name: "Qwen Code",
     icon: "psychology",
     color: "#10B981",
-    description: "Alibaba Qwen Code CLI — OpenAI-compatible endpoint",
-    docsUrl: "https://qwenlm.github.io/qwen-code-docs/",
-    configType: "custom",
+    description:
+      "Alibaba Qwen Code CLI — supports OpenAI, Anthropic & Gemini providers via OmniRoute",
+    docsUrl: "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/",
+    configType: "guide",
     defaultCommand: "qwen",
     notes: [
       {
         type: "info",
-        text: "Qwen Code supports custom OpenAI-compatible API endpoints via environment variables or settings.json.",
+        text: "Qwen Code supports multiple provider types (openai, anthropic, gemini) via modelProviders in settings.json. OmniRoute works as an OpenAI-compatible endpoint.",
+      },
+      {
+        type: "info",
+        text: "Any model available in OmniRoute can be used — not just Qwen models. Select from Qwen, Claude, Gemini, GPT, and more.",
       },
       {
         type: "warning",
-        text: "Config path: Linux/macOS ~/.qwen/ • Windows %USERPROFILE%\\.qwen\\",
+        text: "Config path: Linux/macOS ~/.qwen/settings.json • Windows %USERPROFILE%\\.qwen\\settings.json",
+      },
+      {
+        type: "error",
+        text: "Qwen OAuth free tier was discontinued on 2026-04-15. Use OmniRoute with alicode/openrouter/anthropic/gemini providers instead.",
+      },
+    ],
+    modelAliases: [
+      "coder-model",
+      "qwen3-coder-plus",
+      "qwen3-coder-flash",
+      "vision-model",
+      "claude-sonnet-4-6",
+      "claude-opus-4-6-thinking",
+      "gemini-3-flash",
+      "gemini-3.1-pro-high",
+    ],
+    defaultModels: [
+      {
+        id: "coder-model",
+        name: "Coder Model (Qwen 3.6 Plus)",
+        alias: "coder-model",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "coder-model",
+        isTopLevel: true,
+      },
+      {
+        id: "qwen3-coder-plus",
+        name: "Qwen 3 Coder Plus",
+        alias: "qwen3-coder-plus",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "qwen3-coder-plus",
+      },
+      {
+        id: "qwen3-coder-flash",
+        name: "Qwen 3 Coder Flash",
+        alias: "qwen3-coder-flash",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "qwen3-coder-flash",
+      },
+      {
+        id: "vision-model",
+        name: "Vision Model (Multimodal)",
+        alias: "vision-model",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "vision-model",
+      },
+      {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        alias: "claude-sonnet-4-6",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "claude-sonnet-4-6",
+      },
+      {
+        id: "claude-opus-4-6-thinking",
+        name: "Claude Opus 4.6 Thinking",
+        alias: "claude-opus-4-6-thinking",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "claude-opus-4-6-thinking",
+      },
+      {
+        id: "gemini-3.1-pro-high",
+        name: "Gemini 3.1 Pro High",
+        alias: "gemini-3.1-pro-high",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "gemini-3.1-pro-high",
+      },
+      {
+        id: "gemini-3-flash",
+        name: "Gemini 3 Flash",
+        alias: "gemini-3-flash",
+        envKey: "OPENAI_MODEL",
+        defaultValue: "gemini-3-flash",
       },
     ],
     guideSteps: [
       { step: 1, title: "Install Qwen Code", desc: "npm install -g @qwen-code/qwen-code" },
       { step: 2, title: "API Key", type: "apiKeySelector" },
       { step: 3, title: "Base URL", value: "{{baseUrl}}", copyable: true },
+      { step: 4, title: "Select Model", type: "modelSelector" },
       {
-        step: 4,
-        title: "Configure Settings",
-        desc: "Add to your ~/.qwen/.env file or settings.json env field:",
+        step: 5,
+        title: "Save Config",
+        desc: "Click Save Config below to write your settings.json automatically.",
       },
     ],
     codeBlock: {
-      language: "bash",
-      code: `# ~/.qwen/.env
-OPENAI_API_KEY="{{apiKey}}"
-OPENAI_BASE_URL="{{baseUrl}}"
-OPENAI_MODEL="auto"
-# Or add to settings.json:
-# "env": {
-#   "OPENAI_API_KEY": "{{apiKey}}",
-#   "OPENAI_BASE_URL": "{{baseUrl}}"
-# }`,
+      language: "json",
+      code: `# ~/.qwen/settings.json — OmniRoute via security.auth
+{
+  "security": {
+    "auth": {
+      "selectedType": "openai",
+      "apiKey": "{{apiKey}}",
+      "baseUrl": "{{baseUrl}}"
+    }
+  },
+  "model": {
+    "name": "{{model}}"
+  }
+}`,
     },
   },
-  // HIDDEN: gemini-cli
-  // "gemini-cli": {
-  //   id: "gemini-cli",
-  //   name: "Gemini CLI",
-  //   icon: "terminal",
-  //   color: "#4285F4",
-  //   description: "Google Gemini CLI",
-  //   configType: "env",
-  //   envVars: {
-  //     baseUrl: "GEMINI_API_BASE_URL",
-  //     model: "GEMINI_MODEL",
-  //   },
-  //   defaultModels: [
-  //     { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", alias: "pro" },
-  //     { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", alias: "flash" },
-  //   ],
-  // },
+  custom: {
+    id: "custom",
+    name: "Custom CLI",
+    icon: "terminal",
+    color: "#10B981",
+    description: "Generic OpenAI-compatible CLI or SDK configuration generator",
+    docsUrl: "/docs?section=cli-tools",
+    configType: "custom-builder",
+  },
 };
 
 // Get all provider models for mapping dropdown

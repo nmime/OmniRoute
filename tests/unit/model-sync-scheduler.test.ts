@@ -10,6 +10,7 @@ process.env.DATA_DIR = TEST_DATA_DIR;
 
 const coreDb = await import("../../src/lib/db/core.ts");
 const providersDb = await import("../../src/lib/db/providers.ts");
+const initCloudSync = await import("../../src/lib/initCloudSync.ts");
 
 async function resetStorage() {
   coreDb.resetDbInstance();
@@ -20,7 +21,7 @@ async function resetStorage() {
         fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
       }
       break;
-    } catch (error) {
+    } catch (error: any) {
       if ((error?.code === "EBUSY" || error?.code === "EPERM") && attempt < 9) {
         await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       } else {
@@ -136,12 +137,38 @@ test("initCloudSync: startup initialization also starts model sync scheduler", (
   assert.match(source, /startModelSyncScheduler\s*\(/);
 });
 
-test("proxy: internal model sync token is only allowed for provider model sync routes", () => {
-  const filePath = path.join(process.cwd(), "src/proxy.ts");
-  const source = fs.readFileSync(filePath, "utf8");
+test("cloud sync bootstrap is wired to server startup, not app layout imports", () => {
+  const layoutSource = fs.readFileSync(path.join(process.cwd(), "src/app/layout.tsx"), "utf8");
+  const instrumentationSource = fs.readFileSync(
+    path.join(process.cwd(), "src/instrumentation-node.ts"),
+    "utf8"
+  );
 
-  assert.match(source, /isModelSyncInternalRequest/);
-  assert.match(source, /sync-models\|models/);
+  assert.doesNotMatch(layoutSource, /initCloudSync/);
+  assert.match(instrumentationSource, /ensureCloudSyncInitialized/);
+});
+
+test("initCloudSync skips auto initialization during build and test processes unless explicitly re-enabled", () => {
+  assert.equal(
+    initCloudSync.shouldSkipCloudSyncInitialization({ NEXT_PHASE: "phase-production-build" }, [
+      "node",
+    ]),
+    true
+  );
+  assert.equal(
+    initCloudSync.shouldSkipCloudSyncInitialization({ NODE_ENV: "test" }, ["node", "--test"]),
+    true
+  );
+  assert.equal(
+    initCloudSync.shouldSkipCloudSyncInitialization(
+      {
+        NODE_ENV: "test",
+        OMNIROUTE_ENABLE_RUNTIME_BACKGROUND_TASKS: "1",
+      },
+      ["node", "--test"]
+    ),
+    false
+  );
 });
 
 test("modelSyncScheduler starts once, honors env interval and syncs only active autoSync connections", async () => {

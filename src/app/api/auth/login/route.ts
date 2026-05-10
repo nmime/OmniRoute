@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 import { getAuditRequestContext, logAuditEvent } from "@/lib/compliance/index";
 import { getSettings } from "@/lib/localDb";
-import bcrypt from "bcryptjs";
 import { SignJWT } from "jose";
 import { cookies } from "next/headers";
+import {
+  ensurePersistentManagementPasswordHash,
+  getStoredManagementPassword,
+  verifyManagementPassword,
+} from "@/lib/auth/managementPassword";
 import { loginSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
+import { checkLoginGuard, clearLoginAttempts, recordLoginFailure } from "@/server/auth/loginGuard";
 
 // SECURITY: No hardcoded fallback — JWT_SECRET must be configured.
 if (!process.env.JWT_SECRET) {
@@ -55,33 +60,56 @@ export async function POST(request) {
       return NextResponse.json({ error: "Invalid password payload" }, { status: 400 });
     }
     const settings = await getSettings();
+    const bruteForceEnabled = settings.bruteForceProtection !== false;
+    const clientIp = auditContext.ipAddress || null;
 
-    const storedHash = typeof settings.password === "string" ? settings.password : "";
-
-    let isValid = false;
-    if (storedHash) {
-      isValid = await bcrypt.compare(password, storedHash);
-    } else {
-      // SECURITY: No default password — must be set via env or onboarding
-      if (!process.env.INITIAL_PASSWORD) {
-        logAuditEvent({
-          action: "auth.login.setup_required",
-          actor: "anonymous",
-          target: "dashboard-auth",
-          resourceType: "auth_session",
-          status: "failed",
-          ipAddress: auditContext.ipAddress || undefined,
-          requestId: auditContext.requestId,
-          metadata: { reason: "missing_initial_password" },
-        });
-        return NextResponse.json(
-          { error: "No password configured. Complete onboarding first.", needsSetup: true },
-          { status: 403 }
-        );
-      }
-      const initialPassword = process.env.INITIAL_PASSWORD;
-      isValid = password === initialPassword;
+    const guardCheck = checkLoginGuard(clientIp, { enabled: bruteForceEnabled });
+    if (!guardCheck.allowed) {
+      logAuditEvent({
+        action: "auth.login.locked",
+        actor: "anonymous",
+        target: "dashboard-auth",
+        resourceType: "auth_session",
+        status: "failed",
+        ipAddress: clientIp || undefined,
+        requestId: auditContext.requestId,
+        metadata: { retryAfterSeconds: guardCheck.retryAfterSeconds || 0 },
+      });
+      return NextResponse.json(
+        { error: "Too many failed attempts. Try again later." },
+        {
+          status: 429,
+          headers: guardCheck.retryAfterSeconds
+            ? { "Retry-After": String(guardCheck.retryAfterSeconds) }
+            : {},
+        }
+      );
     }
+
+    const passwordState = await ensurePersistentManagementPasswordHash({
+      settings,
+      source: "auth.login",
+    });
+    const storedHash = getStoredManagementPassword(passwordState.settings);
+
+    if (!storedHash) {
+      logAuditEvent({
+        action: "auth.login.setup_required",
+        actor: "anonymous",
+        target: "dashboard-auth",
+        resourceType: "auth_session",
+        status: "failed",
+        ipAddress: auditContext.ipAddress || undefined,
+        requestId: auditContext.requestId,
+        metadata: { reason: "missing_persisted_password" },
+      });
+      return NextResponse.json(
+        { error: "No password configured. Complete onboarding first.", needsSetup: true },
+        { status: 403 }
+      );
+    }
+
+    const isValid = await verifyManagementPassword(password, storedHash);
 
     if (isValid) {
       const forceSecureCookie = process.env.AUTH_COOKIE_SECURE === "true";
@@ -113,12 +141,16 @@ export async function POST(request) {
         requestId: auditContext.requestId,
         metadata: {
           hasStoredPassword: Boolean(storedHash),
+          passwordMigrated: passwordState.migrated,
           secureCookie: useSecureCookie,
         },
       });
 
+      clearLoginAttempts(clientIp);
       return NextResponse.json({ success: true });
     }
+
+    const failureDecision = recordLoginFailure(clientIp, { enabled: bruteForceEnabled });
 
     logAuditEvent({
       action: "auth.login.failed",
@@ -128,8 +160,21 @@ export async function POST(request) {
       status: "failed",
       ipAddress: auditContext.ipAddress || undefined,
       requestId: auditContext.requestId,
-      metadata: { reason: "invalid_password" },
+      metadata: { reason: "invalid_password", lockedOut: failureDecision.allowed === false },
     });
+
+    if (!failureDecision.allowed) {
+      return NextResponse.json(
+        { error: "Too many failed attempts. Try again later." },
+        {
+          status: 429,
+          headers: failureDecision.retryAfterSeconds
+            ? { "Retry-After": String(failureDecision.retryAfterSeconds) }
+            : {},
+        }
+      );
+    }
+
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   } catch (error) {
     console.error("[AUTH] Login failed:", error);

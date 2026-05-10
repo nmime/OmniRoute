@@ -6,6 +6,42 @@ import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
 
+function parseToolInput(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return {};
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeKiroToolSchema(schema: unknown) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return { type: "object", properties: {}, required: [] };
+  }
+
+  return {
+    type: "object",
+    properties: {},
+    ...(schema as Record<string, unknown>),
+    required: Array.isArray((schema as { required?: unknown }).required)
+      ? (schema as { required: unknown[] }).required
+      : [],
+  };
+}
+
 /**
  * Convert OpenAI messages to Kiro format
  * Rules: system/tool/user -> user role, merge consecutive same roles
@@ -62,7 +98,9 @@ function convertMessages(messages, tools, model) {
               name,
               description,
               inputSchema: {
-                json: t.function?.parameters || t.parameters || t.input_schema || {},
+                json: normalizeKiroToolSchema(
+                  t.function?.parameters || t.parameters || t.input_schema || {}
+                ),
               },
             },
           };
@@ -183,16 +221,13 @@ function convertMessages(messages, tools, model) {
               return {
                 toolUseId: tc.id || uuidv4(),
                 name: tc.function.name,
-                input:
-                  typeof tc.function.arguments === "string"
-                    ? JSON.parse(tc.function.arguments)
-                    : tc.function.arguments || {},
+                input: parseToolInput(tc.function.arguments),
               };
             } else {
               return {
                 toolUseId: tc.id || uuidv4(),
                 name: tc.name,
-                input: tc.input || {},
+                input: parseToolInput(tc.input),
               };
             }
           });
@@ -208,9 +243,19 @@ function convertMessages(messages, tools, model) {
     flushPending();
   }
 
-  // If last message in history is userInputMessage, use it as currentMessage
+  // Kiro requires currentMessage to be a user turn. If the request ends with a
+  // user turn, move that final turn into currentMessage. If it ends with an
+  // assistant/tool turn, keep chronological history intact and ask Kiro to
+  // continue instead of reordering prior turns.
   if (history.length > 0 && history[history.length - 1].userInputMessage) {
     currentMessage = history.pop();
+  } else {
+    currentMessage = {
+      userInputMessage: {
+        content: "Continue",
+        modelId: model,
+      },
+    };
   }
 
   const firstHistoryItem = history[0];
@@ -243,7 +288,50 @@ function convertMessages(messages, tools, model) {
     }
   });
 
-  return { history, currentMessage };
+  // Kiro expects history to alternate between user and assistant turns. After
+  // normalizing `system`/`tool` roles into `userInputMessage`, the history can
+  // contain adjacent user turns, which Kiro can reject. Merge consecutive
+  // `userInputMessage` entries by concatenating their content and preserving
+  // any attached `userInputMessageContext` (e.g. accumulated toolResults).
+  //
+  // Why this is not redundant with the `flushPending` grouping in the main
+  // loop: the assistant branch resets `currentRole = null` after emitting
+  // `toolUses`. Any following `tool` role (normalized to user) and a
+  // subsequent `user` role therefore each open their own flush, producing
+  // two adjacent `userInputMessage` entries in history. This pass collapses
+  // those.
+  const mergedHistory: typeof history = [];
+  for (const item of history) {
+    const previous = mergedHistory[mergedHistory.length - 1];
+    if (item.userInputMessage && previous?.userInputMessage) {
+      const previousContent = previous.userInputMessage.content || "";
+      const currentContent = item.userInputMessage.content || "";
+      previous.userInputMessage.content = previousContent
+        ? `${previousContent}\n\n${currentContent}`
+        : currentContent;
+
+      if (item.userInputMessage.userInputMessageContext) {
+        const previousContext = previous.userInputMessage.userInputMessageContext || {};
+        const nextContext = item.userInputMessage.userInputMessageContext;
+        const mergedContext: Record<string, unknown> = { ...previousContext };
+
+        for (const [key, value] of Object.entries(nextContext)) {
+          const existing = (previousContext as Record<string, unknown>)[key];
+          if (Array.isArray(existing) && Array.isArray(value)) {
+            mergedContext[key] = [...existing, ...value];
+          } else {
+            mergedContext[key] = value;
+          }
+        }
+
+        previous.userInputMessage.userInputMessageContext = mergedContext;
+      }
+    } else {
+      mergedHistory.push(item);
+    }
+  }
+
+  return { history: mergedHistory, currentMessage };
 }
 
 /**

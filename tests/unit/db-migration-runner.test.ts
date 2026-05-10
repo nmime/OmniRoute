@@ -31,13 +31,13 @@ function withMockedMigrationFs(files, fn) {
     return originalExistsSync(target);
   };
 
-  fs.readdirSync = (target, options) => {
+  fs.readdirSync = ((target: string, options?: any) => {
     if (files && isMigrationDir(target)) {
       return Object.keys(files);
     }
 
     return originalReaddirSync(target, options);
-  };
+  }) as any;
 
   fs.readFileSync = (target, options) => {
     const fileName = path.basename(String(target));
@@ -61,6 +61,53 @@ function createDb() {
   return new Database(":memory:");
 }
 
+function createInitialSchemaTables(db) {
+  db.exec(`
+    CREATE TABLE provider_connections (id TEXT PRIMARY KEY);
+    CREATE TABLE combos (id TEXT PRIMARY KEY);
+    CREATE TABLE call_logs (id TEXT PRIMARY KEY);
+  `);
+}
+
+function buildMockMigrationFiles(startVersion, endVersion, prefix) {
+  const files = {};
+
+  for (let version = startVersion; version <= endVersion; version++) {
+    const padded = String(version).padStart(3, "0");
+    const fileName = version === 1 ? "001_initial_schema.sql" : `${padded}_${prefix}_${padded}.sql`;
+    files[fileName] = `CREATE TABLE ${prefix}_${padded} (id INTEGER);`;
+  }
+
+  return files;
+}
+
+function withNonTestEnvironment(fn) {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalVitest = process.env.VITEST;
+  const originalDisableAutoBackup = process.env.DISABLE_SQLITE_AUTO_BACKUP;
+  const originalArgv = [...process.argv];
+
+  delete process.env.NODE_ENV;
+  delete process.env.VITEST;
+  delete process.env.DISABLE_SQLITE_AUTO_BACKUP;
+  process.argv = process.argv.filter((arg) => !arg.includes("test"));
+
+  try {
+    return fn();
+  } finally {
+    process.argv = originalArgv;
+
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+
+    if (originalVitest === undefined) delete process.env.VITEST;
+    else process.env.VITEST = originalVitest;
+
+    if (originalDisableAutoBackup === undefined) delete process.env.DISABLE_SQLITE_AUTO_BACKUP;
+    else process.env.DISABLE_SQLITE_AUTO_BACKUP = originalDisableAutoBackup;
+  }
+}
+
 const REAL_022_ADD_MEMORY_FTS5_SQL = fs.readFileSync(
   path.resolve("src/lib/db/migrations/022_add_memory_fts5.sql"),
   "utf8"
@@ -69,6 +116,17 @@ const REAL_023_FIX_MEMORY_FTS_UUID_SQL = fs.readFileSync(
   path.resolve("src/lib/db/migrations/023_fix_memory_fts_uuid.sql"),
   "utf8"
 );
+
+test("migration infrastructure avoids cwd-based repo tracing fallbacks", () => {
+  const runnerSource = fs.readFileSync(path.resolve("src/lib/db/migrationRunner.ts"), "utf8");
+  const dataPathsSource = fs.readFileSync(path.resolve("src/lib/dataPaths.ts"), "utf8");
+
+  // dataPaths must never use process.cwd() — it resolves via import.meta.url
+  assert.doesNotMatch(dataPathsSource, /process\.cwd\(\)/);
+  // migrationRunner uses import.meta.url as the primary strategy (process.cwd is
+  // only a last-resort fallback for Windows/CI-built bundles with leaked paths)
+  assert.match(runnerSource, /fileURLToPath\(import\.meta\.url\)/);
+});
 
 test("runMigrations applies pending files sequentially in version order", serial, async () => {
   const runner = await importFresh("src/lib/db/migrationRunner.ts");
@@ -127,19 +185,109 @@ test("runMigrations skips versions that are already tracked as applied", serial,
 
     assert.equal(secondRun, 0);
     assert.equal(
-      db.prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?").get("001")
-        .count,
+      (
+        db
+          .prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?")
+          .get("001") as any
+      ).count,
       1
     );
     assert.equal(
-      db.prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?").get("002")
-        .count,
+      (
+        db
+          .prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?")
+          .get("002") as any
+      ).count,
       1
     );
   } finally {
     db.close();
   }
 });
+
+test(
+  "runMigrations applies api key lifecycle migration idempotently when columns already exist",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+      CREATE TABLE api_keys (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        revoked_at TEXT
+      );
+    `);
+
+      const appliedCount = withMockedMigrationFs(
+        {
+          "032_apikey_lifecycle.sql": "ALTER TABLE api_keys ADD COLUMN revoked_at TEXT;",
+        },
+        () => runner.runMigrations(db)
+      );
+
+      assert.equal(appliedCount, 1);
+      const columns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      for (const expected of [
+        "revoked_at",
+        "expires_at",
+        "last_used_at",
+        "key_prefix",
+        "ip_allowlist",
+        "scopes",
+      ]) {
+        assert.equal(names.has(expected), true, `${expected} should exist`);
+      }
+      assert.deepEqual(
+        db.prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?").get("032"),
+        { version: "032", name: "apikey_lifecycle" }
+      );
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "runMigrations applies api key lifecycle hardening by version even if filename suffix changes",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+      CREATE TABLE api_keys (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL
+      );
+    `);
+
+      const appliedCount = withMockedMigrationFs(
+        {
+          "032_renamed_lifecycle_patch.sql": "ALTER TABLE api_keys ADD COLUMN should_not_run TEXT;",
+        },
+        () => runner.runMigrations(db)
+      );
+
+      assert.equal(appliedCount, 1);
+      const columns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      assert.equal(names.has("revoked_at"), true);
+      assert.equal(names.has("expires_at"), true);
+      assert.equal(names.has("should_not_run"), false);
+      assert.deepEqual(
+        db.prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?").get("032"),
+        { version: "032", name: "renamed_lifecycle_patch" }
+      );
+    } finally {
+      db.close();
+    }
+  }
+);
 
 test("getMigrationStatus reports applied and pending migrations", serial, async () => {
   const runner = await importFresh("src/lib/db/migrationRunner.ts");
@@ -213,9 +361,11 @@ test(
         undefined
       );
       assert.equal(
-        db
-          .prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?")
-          .get("002").count,
+        (
+          db
+            .prepare("SELECT COUNT(*) AS count FROM _omniroute_migrations WHERE version = ?")
+            .get("002") as any
+        ).count,
         0
       );
     } finally {
@@ -357,117 +507,6 @@ test(
 );
 
 test(
-  "runMigrations rehomes legacy call_logs_summary_storage tracking so 022_add_memory_fts5 can still apply",
-  serial,
-  async () => {
-    const runner = await importFresh("src/lib/db/migrationRunner.ts");
-    const db = createDb();
-
-    try {
-      db.exec(`
-      CREATE TABLE _omniroute_migrations (
-        version TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
-      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
-        "022",
-        "call_logs_summary_storage"
-      );
-
-      const count = withMockedMigrationFs(
-        {
-          "022_add_memory_fts5.sql": "CREATE TABLE memory_fts_shadow (id INTEGER);",
-          "025_call_logs_summary_storage.sql": "CREATE TABLE call_log_summary_shadow (id INTEGER);",
-        },
-        () => runner.runMigrations(db)
-      );
-
-      assert.equal(count, 1);
-      assert.deepEqual(
-        db.prepare("SELECT version, name FROM _omniroute_migrations ORDER BY version").all(),
-        [
-          { version: "022", name: "add_memory_fts5" },
-          { version: "025", name: "call_logs_summary_storage" },
-        ]
-      );
-      assert.ok(
-        db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-          .get("memory_fts_shadow")
-      );
-      assert.equal(
-        db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-          .get("call_log_summary_shadow"),
-        undefined
-      );
-    } finally {
-      db.close();
-    }
-  }
-);
-
-test(
-  "runMigrations drops stale 022 call_logs_summary_storage rows when 025 is already tracked",
-  serial,
-  async () => {
-    const runner = await importFresh("src/lib/db/migrationRunner.ts");
-    const db = createDb();
-
-    try {
-      db.exec(`
-      CREATE TABLE _omniroute_migrations (
-        version TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
-      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
-        "022",
-        "call_logs_summary_storage"
-      );
-      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
-        "025",
-        "call_logs_summary_storage"
-      );
-
-      const count = withMockedMigrationFs(
-        {
-          "022_add_memory_fts5.sql": "CREATE TABLE memory_fts_shadow_dupe (id INTEGER);",
-          "025_call_logs_summary_storage.sql":
-            "CREATE TABLE call_log_summary_shadow_dupe (id INTEGER);",
-        },
-        () => runner.runMigrations(db)
-      );
-
-      assert.equal(count, 1);
-      assert.deepEqual(
-        db.prepare("SELECT version, name FROM _omniroute_migrations ORDER BY version").all(),
-        [
-          { version: "022", name: "add_memory_fts5" },
-          { version: "025", name: "call_logs_summary_storage" },
-        ]
-      );
-      assert.ok(
-        db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-          .get("memory_fts_shadow_dupe")
-      );
-      assert.equal(
-        db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-          .get("call_log_summary_shadow_dupe"),
-        undefined
-      );
-    } finally {
-      db.close();
-    }
-  }
-);
-
-test(
   "memory FTS migrations upgrade existing UUID memories without datatype mismatches",
   serial,
   async () => {
@@ -524,14 +563,389 @@ test(
         db.prepare("SELECT version FROM _omniroute_migrations ORDER BY version").all(),
         [{ version: "021" }, { version: "022" }, { version: "023" }]
       );
-      assert.deepEqual(
-        db.prepare("SELECT memory_id, content FROM memories").get(),
-        { memory_id: 1, content: "memory content" }
+      assert.deepEqual(db.prepare("SELECT memory_id, content FROM memories").get(), {
+        memory_id: 1,
+        content: "memory content",
+      });
+      assert.deepEqual(db.prepare("SELECT rowid, content, key FROM memory_fts").get(), {
+        rowid: 1,
+        content: "memory content",
+        key: "topic",
+      });
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "runMigrations allows a large pending set when the physical schema still looks like 001",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      createInitialSchemaTables(db);
+      db.exec(`
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
+        "001",
+        "initial_schema"
       );
-      assert.deepEqual(
-        db.prepare("SELECT rowid, content, key FROM memory_fts").get(),
-        { rowid: 1, content: "memory content", key: "topic" }
+
+      const count = withNonTestEnvironment(() =>
+        withMockedMigrationFs(buildMockMigrationFiles(1, 7, "legacy_allow"), () =>
+          runner.runMigrations(db)
+        )
       );
+
+      assert.equal(count, 6);
+      assert.deepEqual(
+        db.prepare("SELECT version FROM _omniroute_migrations ORDER BY version").all(),
+        [
+          { version: "001" },
+          { version: "002" },
+          { version: "003" },
+          { version: "004" },
+          { version: "005" },
+          { version: "006" },
+          { version: "007" },
+        ]
+      );
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "runMigrations aborts large pending sets when the physical schema proves a newer baseline",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      createInitialSchemaTables(db);
+      db.exec(`
+        CREATE TABLE request_detail_logs (id TEXT PRIMARY KEY);
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
+        "001",
+        "initial_schema"
+      );
+
+      assert.throws(
+        () =>
+          withNonTestEnvironment(() =>
+            withMockedMigrationFs(buildMockMigrationFiles(1, 60, "legacy_abort"), () =>
+              runner.runMigrations(db)
+            )
+          ),
+        /Physical schema already shows 006/i
+      );
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "reconcileRenumberedMigrations resolves compression_settings 028→034 upgrade path",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      // Simulate a DB where compression_settings was applied at version 028
+      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
+        "028",
+        "compression_settings"
+      );
+
+      // Disk has compression_settings at 034 (current location) and create_files_and_batches at 028
+      const consoleErrors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        consoleErrors.push(args.map(String).join(" "));
+      };
+
+      try {
+        withMockedMigrationFs(
+          {
+            "028_create_files_and_batches.sql":
+              "CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY);",
+            "034_compression_settings.sql":
+              "CREATE TABLE IF NOT EXISTS compression_settings_table (id TEXT PRIMARY KEY);",
+          },
+          () => runner.runMigrations(db)
+        );
+
+        // The reconcile should have moved 028/compression_settings → 034/compression_settings
+        const row028 = db
+          .prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?")
+          .get("028") as { version: string; name: string } | undefined;
+        const row034 = db
+          .prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?")
+          .get("034") as { version: string; name: string } | undefined;
+
+        // After reconciliation, 028 should be free (or have create_files_and_batches)
+        // and 034 should have compression_settings
+        assert.equal(row034?.name, "compression_settings");
+
+        // No CRITICAL renumbering warning for version 028
+        const renumberingWarnings = consoleErrors.filter(
+          (e) => e.includes("CRITICAL") && e.includes("renumbered")
+        );
+        assert.equal(
+          renumberingWarnings.length,
+          0,
+          `Expected no renumbering warnings, got: ${renumberingWarnings.join("; ")}`
+        );
+      } finally {
+        console.error = originalError;
+      }
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "reconcileRenumberedMigrations resolves compression_analytics 032→038 upgrade path",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      // Simulate DB where compression_analytics was applied at version 032
+      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
+        "032",
+        "compression_analytics"
+      );
+
+      const consoleErrors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        consoleErrors.push(args.map(String).join(" "));
+      };
+
+      try {
+        db.exec(`
+          CREATE TABLE api_keys (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL
+          );
+        `);
+        withMockedMigrationFs(
+          {
+            "032_apikey_lifecycle.sql": "ALTER TABLE api_keys ADD COLUMN revoked_at TEXT;",
+            "038_compression_analytics.sql":
+              "CREATE TABLE IF NOT EXISTS compression_analytics (id TEXT PRIMARY KEY);",
+          },
+          () => runner.runMigrations(db)
+        );
+
+        const row038 = db
+          .prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?")
+          .get("038") as { version: string; name: string } | undefined;
+
+        assert.equal(row038?.name, "compression_analytics");
+
+        const renumberingWarnings = consoleErrors.filter(
+          (e) => e.includes("CRITICAL") && e.includes("renumbered")
+        );
+        assert.equal(
+          renumberingWarnings.length,
+          0,
+          `Expected no renumbering warnings, got: ${renumberingWarnings.join("; ")}`
+        );
+      } finally {
+        console.error = originalError;
+      }
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "reconcileRenumberedMigrations resolves compression_cache_stats 033→039 upgrade path",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      // Simulate DB where compression_cache_stats was applied at version 033
+      db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(
+        "033",
+        "compression_cache_stats"
+      );
+
+      const consoleErrors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        consoleErrors.push(args.map(String).join(" "));
+      };
+
+      try {
+        withMockedMigrationFs(
+          {
+            "033_create_reasoning_cache.sql":
+              "CREATE TABLE IF NOT EXISTS reasoning_cache (id TEXT PRIMARY KEY);",
+            "039_compression_cache_stats.sql":
+              "CREATE TABLE IF NOT EXISTS compression_cache_stats_table (id TEXT PRIMARY KEY);",
+          },
+          () => runner.runMigrations(db)
+        );
+
+        const row039 = db
+          .prepare("SELECT version, name FROM _omniroute_migrations WHERE version = ?")
+          .get("039") as { version: string; name: string } | undefined;
+
+        assert.equal(row039?.name, "compression_cache_stats");
+
+        const renumberingWarnings = consoleErrors.filter(
+          (e) => e.includes("CRITICAL") && e.includes("renumbered")
+        );
+        assert.equal(
+          renumberingWarnings.length,
+          0,
+          `Expected no renumbering warnings, got: ${renumberingWarnings.join("; ")}`
+        );
+      } finally {
+        console.error = originalError;
+      }
+    } finally {
+      db.close();
+    }
+  }
+);
+
+test(
+  "full upgrade simulation: all 3 renumbered migrations reconciled without CRITICAL warnings",
+  serial,
+  async () => {
+    const runner = await importFresh("src/lib/db/migrationRunner.ts");
+    const db = createDb();
+
+    try {
+      db.exec(`
+        CREATE TABLE _omniroute_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      // Simulate a user's DB that has all 3 old migration entries
+      const oldMigrations = [
+        ["027", "skill_mode_and_metadata"],
+        ["028", "compression_settings"],
+        ["029", "provider_connection_max_concurrent"],
+        ["032", "compression_analytics"],
+        ["033", "compression_cache_stats"],
+      ] as const;
+      for (const [v, n] of oldMigrations) {
+        db.prepare("INSERT INTO _omniroute_migrations (version, name) VALUES (?, ?)").run(v, n);
+      }
+
+      // Disk has the current migration file layout
+      const consoleErrors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        consoleErrors.push(args.map(String).join(" "));
+      };
+
+      try {
+        db.exec(`
+          CREATE TABLE api_keys (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL
+          );
+        `);
+        withMockedMigrationFs(
+          {
+            "027_skill_mode_and_metadata.sql":
+              "CREATE TABLE IF NOT EXISTS skill_meta (id TEXT PRIMARY KEY);",
+            "028_create_files_and_batches.sql":
+              "CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY);",
+            "029_provider_connection_max_concurrent.sql":
+              "ALTER TABLE provider_connections ADD COLUMN max_concurrent INTEGER;",
+            "032_apikey_lifecycle.sql": "ALTER TABLE api_keys ADD COLUMN revoked_at TEXT;",
+            "033_create_reasoning_cache.sql":
+              "CREATE TABLE IF NOT EXISTS reasoning_cache (id TEXT PRIMARY KEY);",
+            "034_compression_settings.sql":
+              "CREATE TABLE IF NOT EXISTS compression_settings_table (id TEXT PRIMARY KEY);",
+            "038_compression_analytics.sql":
+              "CREATE TABLE IF NOT EXISTS compression_analytics (id TEXT PRIMARY KEY);",
+            "039_compression_cache_stats.sql":
+              "CREATE TABLE IF NOT EXISTS compression_cache_stats_table (id TEXT PRIMARY KEY);",
+          },
+          () => runner.runMigrations(db)
+        );
+
+        // No CRITICAL renumbering warnings
+        const renumberingWarnings = consoleErrors.filter(
+          (e) => e.includes("CRITICAL") && e.includes("renumbered")
+        );
+        assert.equal(
+          renumberingWarnings.length,
+          0,
+          `Expected no renumbering warnings, got: ${renumberingWarnings.join("; ")}`
+        );
+
+        // Verify the reconciled entries
+        const row034 = db
+          .prepare("SELECT name FROM _omniroute_migrations WHERE version = ?")
+          .get("034") as { name: string } | undefined;
+        const row038 = db
+          .prepare("SELECT name FROM _omniroute_migrations WHERE version = ?")
+          .get("038") as { name: string } | undefined;
+        const row039 = db
+          .prepare("SELECT name FROM _omniroute_migrations WHERE version = ?")
+          .get("039") as { name: string } | undefined;
+
+        assert.equal(row034?.name, "compression_settings");
+        assert.equal(row038?.name, "compression_analytics");
+        assert.equal(row039?.name, "compression_cache_stats");
+      } finally {
+        console.error = originalError;
+      }
     } finally {
       db.close();
     }

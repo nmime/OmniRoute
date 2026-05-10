@@ -2,6 +2,7 @@
  * db/apiKeys.js — API key management.
  */
 
+import { createHash } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { getDbInstance, rowToCamel } from "./core";
 import { backupDbFile } from "./backup";
@@ -18,6 +19,11 @@ type JsonRecord = Record<string, unknown>;
 interface CacheEntry<TValue> {
   timestamp: number;
   value: TValue;
+}
+
+export interface RateLimitRule {
+  limit: number;
+  window: number;
 }
 
 export interface AccessSchedule {
@@ -40,8 +46,16 @@ interface ApiKeyMetadata {
   accessSchedule: AccessSchedule | null;
   maxRequestsPerDay: number | null;
   maxRequestsPerMinute: number | null;
+  rateLimits: RateLimitRule[] | null;
   // T08: Per-key max concurrent sticky sessions (0 = unlimited)
   maxSessions: number;
+  // Phase 3 lifecycle/policy fields
+  revokedAt: string | null;
+  expiresAt: string | null;
+  ipAllowlist: string[];
+  scopes: string[];
+  isBanned: boolean;
+  keyHash: string | null;
 }
 
 interface ApiKeyRow extends JsonRecord {
@@ -62,6 +76,8 @@ interface ApiKeyRow extends JsonRecord {
   isActive?: unknown;
   access_schedule?: unknown;
   accessSchedule?: unknown;
+  rate_limits?: unknown;
+  rateLimits?: unknown;
 }
 
 interface StatementLike<TRow = unknown> {
@@ -92,16 +108,40 @@ interface ApiKeyView extends JsonRecord {
   autoResolve: boolean;
   isActive: boolean;
   accessSchedule: AccessSchedule | null;
+  rateLimits: RateLimitRule[] | null;
 }
 
 // LRU cache for API key validation (valid keys only)
 const _keyValidationCache = new Map<string, { valid: boolean; timestamp: number }>();
 const _keyMetadataCache = new Map<string, CacheEntry<ApiKeyMetadata>>();
+const _lastUsedUpdateCache = new Map<string, number>();
 const CACHE_TTL = 60 * 1000; // 1 minute TTL
+const LAST_USED_UPDATE_TTL = 5 * 60 * 1000;
 const MAX_CACHE_SIZE = 1000;
 
 // Compiled regex cache for wildcard patterns
 const _regexCache = new Map<string, RegExp>();
+
+const API_KEY_COLUMN_FALLBACKS = [
+  { name: "allowed_models", definition: "allowed_models TEXT" },
+  { name: "no_log", definition: "no_log INTEGER NOT NULL DEFAULT 0" },
+  { name: "allowed_connections", definition: "allowed_connections TEXT" },
+  { name: "auto_resolve", definition: "auto_resolve INTEGER NOT NULL DEFAULT 0" },
+  { name: "is_active", definition: "is_active INTEGER NOT NULL DEFAULT 1" },
+  { name: "access_schedule", definition: "access_schedule TEXT" },
+  { name: "max_requests_per_day", definition: "max_requests_per_day INTEGER" },
+  { name: "max_requests_per_minute", definition: "max_requests_per_minute INTEGER" },
+  { name: "max_sessions", definition: "max_sessions INTEGER NOT NULL DEFAULT 0" },
+  { name: "revoked_at", definition: "revoked_at TEXT" },
+  { name: "expires_at", definition: "expires_at TEXT" },
+  { name: "last_used_at", definition: "last_used_at TEXT" },
+  { name: "key_prefix", definition: "key_prefix TEXT" },
+  { name: "ip_allowlist", definition: "ip_allowlist TEXT" },
+  { name: "scopes", definition: "scopes TEXT" },
+  { name: "rate_limits", definition: "rate_limits TEXT" },
+  { name: "is_banned", definition: "is_banned INTEGER NOT NULL DEFAULT 0" },
+  { name: "key_hash", definition: "key_hash TEXT" },
+] as const;
 
 // Cache for model permission checks
 const _modelPermissionCache = new Map<string, { allowed: boolean; timestamp: number }>();
@@ -121,10 +161,29 @@ function invalidateCaches() {
   _keyValidationCache.clear();
   _keyMetadataCache.clear();
   _modelPermissionCache.clear();
+  _lastUsedUpdateCache.clear();
 }
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
+}
+
+function isConfiguredEnvApiKey(key: string): boolean {
+  const envKey = process.env.OMNIROUTE_API_KEY || process.env.ROUTER_API_KEY;
+  return Boolean(envKey && key === envKey);
+}
+
+function markApiKeyUsed(db: ApiKeysDbLike, id: unknown, now: number): void {
+  if (typeof id !== "string" || id.trim() === "") return;
+
+  const lastUpdate = _lastUsedUpdateCache.get(id);
+  if (lastUpdate && now - lastUpdate < LAST_USED_UPDATE_TTL) return;
+
+  db.prepare("UPDATE api_keys SET last_used_at = @lastUsedAt WHERE id = @id").run({
+    id,
+    lastUsedAt: new Date(now).toISOString(),
+  });
+  _lastUsedUpdateCache.set(id, now);
 }
 
 /**
@@ -160,6 +219,16 @@ function getWildcardRegex(pattern: string): RegExp {
   return regex;
 }
 
+function ensureApiKeyColumn(
+  db: ApiKeysDbLike,
+  columnNames: Set<string>,
+  column: (typeof API_KEY_COLUMN_FALLBACKS)[number]
+): void {
+  if (columnNames.has(column.name)) return;
+  db.exec(`ALTER TABLE api_keys ADD COLUMN ${column.definition}`);
+  console.log(`[DB] Added api_keys.${column.name} column`);
+}
+
 // Ensure api_keys extension columns exist (memoized)
 function ensureApiKeysColumns(db: ApiKeysDbLike) {
   if (_schemaChecked) return;
@@ -167,42 +236,8 @@ function ensureApiKeysColumns(db: ApiKeysDbLike) {
   try {
     const columns = db.prepare<ApiKeyRow>("PRAGMA table_info(api_keys)").all();
     const columnNames = new Set(columns.map((column) => String(column.name ?? "")));
-    if (!columnNames.has("allowed_models")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN allowed_models TEXT");
-      console.log("[DB] Added api_keys.allowed_models column");
-    }
-    if (!columnNames.has("no_log")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN no_log INTEGER NOT NULL DEFAULT 0");
-      console.log("[DB] Added api_keys.no_log column");
-    }
-    if (!columnNames.has("allowed_connections")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN allowed_connections TEXT");
-      console.log("[DB] Added api_keys.allowed_connections column");
-    }
-    if (!columnNames.has("auto_resolve")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN auto_resolve INTEGER NOT NULL DEFAULT 0");
-      console.log("[DB] Added api_keys.auto_resolve column");
-    }
-    if (!columnNames.has("is_active")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1");
-      console.log("[DB] Added api_keys.is_active column");
-    }
-    if (!columnNames.has("access_schedule")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN access_schedule TEXT");
-      console.log("[DB] Added api_keys.access_schedule column");
-    }
-    if (!columnNames.has("max_requests_per_day")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN max_requests_per_day INTEGER");
-      console.log("[DB] Added api_keys.max_requests_per_day column");
-    }
-    if (!columnNames.has("max_requests_per_minute")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN max_requests_per_minute INTEGER");
-      console.log("[DB] Added api_keys.max_requests_per_minute column");
-    }
-    // T08: max concurrent sticky sessions per key (0 = unlimited)
-    if (!columnNames.has("max_sessions")) {
-      db.exec("ALTER TABLE api_keys ADD COLUMN max_sessions INTEGER NOT NULL DEFAULT 0");
-      console.log("[DB] Added api_keys.max_sessions column");
+    for (const column of API_KEY_COLUMN_FALLBACKS) {
+      ensureApiKeyColumn(db, columnNames, column);
     }
     _schemaChecked = true;
   } catch (error) {
@@ -227,12 +262,14 @@ function getPreparedStatements(db: ApiKeysDbLike): ApiKeysStatements {
   ) {
     _stmtGetAllKeys = db.prepare<ApiKeyRow>("SELECT * FROM api_keys ORDER BY created_at");
     _stmtGetKeyById = db.prepare<ApiKeyRow>("SELECT * FROM api_keys WHERE id = ?");
-    _stmtValidateKey = db.prepare<JsonRecord>("SELECT 1 FROM api_keys WHERE key = ?");
+    _stmtValidateKey = db.prepare<JsonRecord>(
+      "SELECT id, expires_at, revoked_at, is_active, is_banned FROM api_keys WHERE key = ? OR key_hash = ?"
+    );
     _stmtGetKeyMetadata = db.prepare<ApiKeyRow>(
-      "SELECT id, name, machine_id, allowed_models, allowed_connections, no_log, auto_resolve, is_active, access_schedule, max_requests_per_day, max_requests_per_minute, max_sessions FROM api_keys WHERE key = ?"
+      "SELECT id, name, machine_id, allowed_models, allowed_connections, no_log, auto_resolve, is_active, access_schedule, max_requests_per_day, max_requests_per_minute, max_sessions, revoked_at, expires_at, ip_allowlist, scopes, rate_limits, is_banned, key_hash FROM api_keys WHERE key = ? OR key_hash = ?"
     );
     _stmtInsertKey = db.prepare(
-      "INSERT INTO api_keys (id, name, key, machine_id, allowed_models, no_log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO api_keys (id, name, key, machine_id, allowed_models, no_log, created_at, key_prefix, key_hash, scopes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
     _stmtDeleteKey = db.prepare("DELETE FROM api_keys WHERE id = ?");
   }
@@ -270,6 +307,8 @@ export async function getApiKeys() {
     camelRow.autoResolve = parseAutoResolve(camelRow.autoResolve);
     camelRow.isActive = parseIsActive(camelRow.isActive);
     camelRow.accessSchedule = parseAccessSchedule(camelRow.accessSchedule);
+    camelRow.rateLimits = parseRateLimits(camelRow.rateLimits);
+    camelRow.isBanned = parseIsBanned(camelRow.isBanned);
     if (typeof camelRow.id === "string" && camelRow.id.length > 0) {
       setNoLog(camelRow.id, camelRow.noLog === true);
     }
@@ -289,6 +328,8 @@ export async function getApiKeyById(id: string) {
   camelRow.autoResolve = parseAutoResolve(camelRow.autoResolve);
   camelRow.isActive = parseIsActive(camelRow.isActive);
   camelRow.accessSchedule = parseAccessSchedule(camelRow.accessSchedule);
+  camelRow.rateLimits = parseRateLimits(camelRow.rateLimits);
+  camelRow.isBanned = parseIsBanned(camelRow.isBanned);
   if (typeof camelRow.id === "string" && camelRow.id.length > 0) {
     setNoLog(camelRow.id, camelRow.noLog === true);
   }
@@ -356,6 +397,23 @@ function parseAccessSchedule(value: unknown): AccessSchedule | null {
   }
 }
 
+function parseRateLimits(value: unknown): RateLimitRule[] | null {
+  if (!value || typeof value !== "string" || value.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter(
+      (rule: any) =>
+        typeof rule === "object" &&
+        rule !== null &&
+        typeof rule.limit === "number" &&
+        typeof rule.window === "number"
+    ) as RateLimitRule[];
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Helper function to safely parse allowed_connections JSON
  */
@@ -373,7 +431,34 @@ function parseAllowedConnections(value: unknown): string[] {
   }
 }
 
-export async function createApiKey(name: string, machineId: string) {
+function parseStringList(value: unknown): string[] {
+  if (!value || typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseNullableTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function parseIsBanned(value: unknown): boolean {
+  return value === 1 || value === "1" || value === true;
+}
+
+async function hashKey(key: string): Promise<string> {
+  if (!key || typeof key !== "string") return "";
+  return createHash("sha256").update(key).digest("hex"); /* lgtm[js/insufficient-password-hash] */
+}
+
+export async function createApiKey(name: string, machineId: string, scopes: string[] = []) {
   if (!machineId) {
     throw new Error("machineId is required");
   }
@@ -393,6 +478,7 @@ export async function createApiKey(name: string, machineId: string) {
     allowedConnections: [], // Empty array means all connections allowed
     noLog: false,
     createdAt: now,
+    scopes,
   };
 
   const stmt = getPreparedStatements(db);
@@ -403,12 +489,56 @@ export async function createApiKey(name: string, machineId: string) {
     apiKey.machineId,
     "[]",
     0,
-    apiKey.createdAt
+    apiKey.createdAt,
+    apiKey.key.slice(0, 12),
+    await hashKey(apiKey.key),
+    JSON.stringify(scopes)
   );
   setNoLog(apiKey.id, false);
 
   backupDbFile("pre-write");
   return apiKey;
+}
+
+export async function regenerateApiKey(id: string) {
+  const db = getDbInstance() as ApiKeysDbLike;
+  const stmt = getPreparedStatements(db);
+  const row = stmt.getKeyById.get(id) as ApiKeyRow | undefined;
+  if (!row) return null;
+
+  const { generateApiKeyWithMachine } = await import("@/shared/utils/apiKey");
+  const machineId = (row.machine_id || row.machineId || "0000000000000000") as string;
+  const { key: newKey } = generateApiKeyWithMachine(machineId);
+  const newHash = await hashKey(newKey);
+  const newPrefix = newKey.slice(0, 12);
+
+  // Update in DB
+  const updateStmt = db.prepare(
+    "UPDATE api_keys SET key = ?, key_hash = ?, key_prefix = ? WHERE id = ?"
+  );
+  updateStmt.run(newKey, newHash, newPrefix, id);
+
+  // Invalidate all caches
+  clearApiKeyCaches();
+
+  // Redis invalidation
+  try {
+    const { getRedisClient } = await import("@/shared/utils/rateLimiter");
+    const redis = getRedisClient();
+    if (typeof row.key_hash === "string") await redis.del(`auth:api_key:${row.key_hash}`);
+    await redis.del(`auth:api_key:${newHash}`);
+  } catch (err) {
+    // Fail silent
+  }
+
+  const { logAuditEvent } = await import("@/lib/compliance");
+  logAuditEvent({
+    action: "apiKey.regenerate",
+    target: id,
+    details: { name: String(row.name || "") },
+  });
+
+  return { id, key: newKey };
 }
 
 export async function updateApiKeyPermissions(
@@ -425,8 +555,12 @@ export async function updateApiKeyPermissions(
         accessSchedule?: AccessSchedule | null;
         maxRequestsPerDay?: number | null;
         maxRequestsPerMinute?: number | null;
+        rateLimits?: RateLimitRule[] | null;
+        isBanned?: boolean;
+        expiresAt?: string | null;
         // T08: max concurrent sessions for this key (0 = unlimited)
         maxSessions?: number | null;
+        scopes?: string[] | null;
       }
 ) {
   const db = getDbInstance() as ApiKeysDbLike;
@@ -445,7 +579,11 @@ export async function updateApiKeyPermissions(
           accessSchedule: update.accessSchedule,
           maxRequestsPerDay: update.maxRequestsPerDay,
           maxRequestsPerMinute: update.maxRequestsPerMinute,
+          rateLimits: update.rateLimits,
+          isBanned: update.isBanned,
+          expiresAt: update.expiresAt,
           maxSessions: (update as { maxSessions?: number | null }).maxSessions,
+          scopes: (update as { scopes?: string[] | null }).scopes,
         };
 
   if (
@@ -458,7 +596,11 @@ export async function updateApiKeyPermissions(
     normalized.accessSchedule === undefined &&
     normalized.maxRequestsPerDay === undefined &&
     normalized.maxRequestsPerMinute === undefined &&
-    (normalized as Record<string, unknown>).maxSessions === undefined
+    normalized.rateLimits === undefined &&
+    normalized.isBanned === undefined &&
+    normalized.expiresAt === undefined &&
+    (normalized as Record<string, unknown>).maxSessions === undefined &&
+    (normalized as Record<string, unknown>).scopes === undefined
   ) {
     return false;
   }
@@ -475,7 +617,11 @@ export async function updateApiKeyPermissions(
     accessSchedule?: string | null;
     maxRequestsPerDay?: number | null;
     maxRequestsPerMinute?: number | null;
+    rateLimits?: string | null;
+    isBanned?: number;
     maxSessions?: number;
+    expiresAt?: string | null;
+    scopes?: string;
   } = { id };
 
   if (normalized.name !== undefined) {
@@ -526,15 +672,53 @@ export async function updateApiKeyPermissions(
     params.maxRequestsPerMinute = normalized.maxRequestsPerMinute;
   }
 
+  if (normalized.rateLimits !== undefined) {
+    updates.push("rate_limits = @rateLimits");
+    params.rateLimits =
+      normalized.rateLimits !== null ? JSON.stringify(normalized.rateLimits) : null;
+  }
+
+  if (normalized.isBanned !== undefined) {
+    updates.push("is_banned = @isBanned");
+    params.isBanned = normalized.isBanned ? 1 : 0;
+  }
+
+  if (normalized.expiresAt !== undefined) {
+    updates.push("expires_at = @expiresAt");
+    params.expiresAt = normalized.expiresAt;
+  }
+
   const maxSessionsUpdate = (normalized as Record<string, unknown>).maxSessions;
   if (maxSessionsUpdate !== undefined) {
     updates.push("max_sessions = @maxSessions");
     params.maxSessions = typeof maxSessionsUpdate === "number" ? Math.max(0, maxSessionsUpdate) : 0;
   }
 
+  const scopesUpdate = (normalized as Record<string, unknown>).scopes;
+  if (scopesUpdate !== undefined) {
+    updates.push("scopes = @scopes");
+    params.scopes = JSON.stringify(Array.isArray(scopesUpdate) ? scopesUpdate : []);
+  }
+
   const result = db.prepare(`UPDATE api_keys SET ${updates.join(", ")} WHERE id = @id`).run(params);
 
   if (result.changes === 0) return false;
+
+  const { logAuditEvent } = await import("@/lib/compliance");
+
+  if (normalized.isBanned !== undefined) {
+    logAuditEvent({
+      action: normalized.isBanned ? "apiKey.ban" : "apiKey.unban",
+      target: id,
+    });
+  }
+
+  if (normalized.isActive !== undefined) {
+    logAuditEvent({
+      action: normalized.isActive ? "apiKey.activate" : "apiKey.deactivate",
+      target: id,
+    });
+  }
 
   if (normalized.noLog !== undefined) {
     setNoLog(id, normalized.noLog);
@@ -542,6 +726,20 @@ export async function updateApiKeyPermissions(
 
   // Invalidate caches since permissions changed
   invalidateCaches();
+
+  // Also invalidate Redis if key_hash is available
+  try {
+    const row = db.prepare("SELECT key_hash FROM api_keys WHERE id = ?").get(id) as
+      | { key_hash: string | null }
+      | undefined;
+    if (row?.key_hash) {
+      const { getRedisClient } = await import("@/shared/utils/rateLimiter");
+      const redis = getRedisClient();
+      await redis.del(`auth:api_key:${row.key_hash}`);
+    }
+  } catch (err) {
+    // Fail silent
+  }
 
   backupDbFile("pre-write");
   return true;
@@ -566,32 +764,146 @@ export async function deleteApiKey(id: string) {
 }
 
 /**
- * Validate API key with caching for performance
- * Cached valid keys reduce DB hits on every request
+ * Revoke an API key by id. Logical, not destructive: the row stays so it can
+ * be audited, but validateApiKey() rejects it immediately after caches expire
+ * (or sooner because invalidateCaches() runs here).
+ */
+export async function revokeApiKey(id: string): Promise<boolean> {
+  const db = getDbInstance() as ApiKeysDbLike;
+  getPreparedStatements(db);
+
+  const result = db
+    .prepare(
+      "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, @ts), is_active = 0 WHERE id = @id"
+    )
+    .run({ id, ts: new Date().toISOString() });
+
+  if ((result.changes ?? 0) === 0) return false;
+
+  invalidateCaches();
+  backupDbFile("pre-write");
+  return true;
+}
+
+/**
+ * Set or clear the expiry of an API key. Pass null to remove the expiry.
+ */
+export async function setApiKeyExpiry(id: string, expiresAt: string | null): Promise<boolean> {
+  const db = getDbInstance() as ApiKeysDbLike;
+  getPreparedStatements(db);
+
+  const result = db
+    .prepare("UPDATE api_keys SET expires_at = @expiresAt WHERE id = @id")
+    .run({ id, expiresAt });
+
+  if ((result.changes ?? 0) === 0) return false;
+
+  invalidateCaches();
+  backupDbFile("pre-write");
+  return true;
+}
+
+/**
+ * Validate API key with lifecycle gates and caching.
+ *
+ * A key is valid only when ALL of the following are true:
+ *   - the row exists,
+ *   - is_active = 1,
+ *   - revoked_at IS NULL,
+ *   - expires_at IS NULL OR expires_at > now.
+ *
+ * Cache TTL is short (CACHE_TTL) and the metadata cache is also invalidated
+ * by revokeApiKey/updateApiKeyPermissions/deleteApiKey, so a revoke takes
+ * effect within at most CACHE_TTL even without an explicit clear in the
+ * caller.
  */
 export async function validateApiKey(key: string | null | undefined) {
   if (!key || typeof key !== "string") return false;
 
-  const now = Date.now();
+  if (isConfiguredEnvApiKey(key)) return true;
 
-  // Check cache first
-  const cached = _keyValidationCache.get(key);
+  const now = Date.now();
+  const hashedKey = await hashKey(key);
+  const cacheKey = hashedKey;
+
+  const cached = _keyValidationCache.get(cacheKey);
   if (cached && now - cached.timestamp < CACHE_TTL) {
     return cached.valid;
   }
 
-  const db = getDbInstance() as ApiKeysDbLike;
-  const stmt = getPreparedStatements(db);
-  const row = stmt.validateKey.get(key);
-  const valid = !!row;
+  // Try Redis cache for multi-instance consistency
+  try {
+    const { getRedisClient } = await import("@/shared/utils/rateLimiter");
+    const redis = getRedisClient();
+    const redisKey = `auth:api_key:${hashedKey}`;
+    const redisData = await redis.get(redisKey);
+    if (redisData) {
+      const data = JSON.parse(redisData);
+      const isBanned = !!data.isBanned;
+      const isActive = !!data.isActive;
+      const revokedAt = data.revokedAt;
+      const expiresAt = data.expiresAt;
 
-  // Only cache valid keys to prevent cache pollution
-  if (valid) {
-    evictIfNeeded(_keyValidationCache);
-    _keyValidationCache.set(key, { valid: true, timestamp: now });
+      if (isBanned || !isActive) return false;
+      if (typeof revokedAt === "string" && revokedAt.trim() !== "") return false;
+      if (typeof expiresAt === "string" && expiresAt.trim() !== "") {
+        const expiresMs = Date.parse(expiresAt);
+        if (Number.isFinite(expiresMs) && expiresMs <= now) return false;
+      }
+      return true;
+    }
+  } catch (err) {
+    // Fail silent for Redis lookup
   }
 
-  return valid;
+  const db = getDbInstance() as ApiKeysDbLike;
+  const stmt = getPreparedStatements(db);
+  const row = stmt.validateKey.get(key, hashedKey) as JsonRecord | undefined;
+
+  if (!row) return false;
+
+  const isBanned = parseIsBanned(row.is_banned ?? row.isBanned);
+  if (isBanned) return false;
+
+  const isActive = parseIsActive(row.is_active ?? row.isActive);
+  if (!isActive) return false;
+
+  const revokedAt = row.revoked_at ?? row.revokedAt;
+  if (typeof revokedAt === "string" && revokedAt.trim() !== "") return false;
+
+  const expiresAt = row.expires_at ?? row.expiresAt;
+  if (typeof expiresAt === "string" && expiresAt.trim() !== "") {
+    const expiresMs = Date.parse(expiresAt);
+    if (Number.isFinite(expiresMs) && expiresMs <= now) return false;
+  }
+
+  evictIfNeeded(_keyValidationCache);
+  _keyValidationCache.set(cacheKey, { valid: true, timestamp: now });
+
+  // Update Redis cache for fast validation
+  try {
+    const { getRedisClient } = await import("@/shared/utils/rateLimiter");
+    const redis = getRedisClient();
+    const redisKey = `auth:api_key:${hashedKey}`;
+    await redis.set(
+      redisKey,
+      JSON.stringify({
+        id: row.id,
+        isBanned: parseIsBanned(row.is_banned),
+        isActive: parseIsActive(row.is_active),
+        expiresAt: row.expires_at,
+        revokedAt: row.revoked_at,
+      }),
+      "EX",
+      3600 // 1 hour cache
+    );
+  } catch (err) {
+    // Fail silent for Redis cache update
+  }
+
+  markApiKeyUsed(db, row.id, now);
+
+  return true;
 }
 
 /**
@@ -604,15 +916,41 @@ export async function getApiKeyMetadata(
 
   const now = Date.now();
 
+  // persistent env-var key support (persistent passthrough keys) (#1350)
+  if (isConfiguredEnvApiKey(key)) {
+    return {
+      id: "env-key",
+      name: "Environment Key",
+      machineId: "server-env",
+      allowedModels: [],
+      allowedConnections: [],
+      noLog: false,
+      autoResolve: true,
+      isActive: true,
+      accessSchedule: null,
+      rateLimits: null,
+      maxRequestsPerDay: null,
+      maxRequestsPerMinute: null,
+      maxSessions: 0,
+      revokedAt: null,
+      expiresAt: null,
+      ipAllowlist: [],
+      isBanned: false,
+      keyHash: null,
+      scopes: ["manage"],
+    };
+  }
+
   // Check cache first
-  const cached = _keyMetadataCache.get(key);
+  const hashedKey = await hashKey(key);
+  const cached = _keyMetadataCache.get(hashedKey);
   if (cached && now - cached.timestamp < CACHE_TTL) {
     return cached.value;
   }
 
   const db = getDbInstance() as ApiKeysDbLike;
   const stmt = getPreparedStatements(db);
-  const row = stmt.getKeyMetadata.get(key);
+  const row = stmt.getKeyMetadata.get(key, hashedKey);
 
   if (!row) return null;
 
@@ -639,10 +977,17 @@ export async function getApiKeyMetadata(
     autoResolve: parseAutoResolve(record.auto_resolve ?? record.autoResolve),
     isActive: parseIsActive(record.is_active ?? record.isActive),
     accessSchedule: parseAccessSchedule(record.access_schedule ?? record.accessSchedule),
+    rateLimits: parseRateLimits(record.rate_limits ?? (record as JsonRecord).rateLimits),
     maxRequestsPerDay: typeof rawMaxRPD === "number" && rawMaxRPD > 0 ? rawMaxRPD : null,
     maxRequestsPerMinute: typeof rawMaxRPM === "number" && rawMaxRPM > 0 ? rawMaxRPM : null,
     // T08: max concurrent sessions; 0 = unlimited (default & backward-compatible)
     maxSessions: typeof rawMaxSessions === "number" && rawMaxSessions > 0 ? rawMaxSessions : 0,
+    revokedAt: parseNullableTimestamp(record.revoked_at ?? (record as JsonRecord).revokedAt),
+    expiresAt: parseNullableTimestamp(record.expires_at ?? (record as JsonRecord).expiresAt),
+    ipAllowlist: parseStringList(record.ip_allowlist ?? (record as JsonRecord).ipAllowlist),
+    scopes: parseStringList((record as JsonRecord).scopes),
+    isBanned: parseIsBanned(record.is_banned ?? (record as JsonRecord).isBanned),
+    keyHash: (record.key_hash ?? (record as JsonRecord).keyHash) as string | null,
   };
 
   if (!metadata.id) {
@@ -653,7 +998,7 @@ export async function getApiKeyMetadata(
 
   // Cache the result
   evictIfNeeded(_keyMetadataCache);
-  _keyMetadataCache.set(key, { value: metadata, timestamp: now });
+  _keyMetadataCache.set(hashedKey, { value: metadata, timestamp: now });
 
   return metadata;
 }
@@ -747,6 +1092,7 @@ function clearPreparedStatementCache() {
  */
 export function clearApiKeyCaches() {
   invalidateCaches();
+  _lastUsedUpdateCache.clear();
   _modelPermissionCache.clear();
   _regexCache.clear();
 }

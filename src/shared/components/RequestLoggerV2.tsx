@@ -6,9 +6,9 @@ import Card from "./Card";
 import RequestLoggerDetail from "./RequestLoggerDetail";
 import { copyToClipboard } from "@/shared/utils/clipboard";
 import {
-  PROTOCOL_COLORS,
   PROVIDER_COLORS,
   getHttpStatusStyle as getStatusStyle,
+  getProtocolColor,
 } from "@/shared/constants/colors";
 import {
   formatTime,
@@ -17,33 +17,7 @@ import {
   maskAccount,
   formatApiKeyLabel,
 } from "@/shared/utils/formatting";
-
-// Quick filter categories - status-based only (providers are dynamic from data)
-const STATUS_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "error", label: "Errors", icon: "error" },
-  { key: "ok", label: "Success", icon: "check_circle" },
-  { key: "combo", label: "Combo", icon: "hub" },
-];
-
-// Column definitions for visibility toggles
-const COLUMNS = [
-  { key: "status", label: "Status" },
-  { key: "cacheSource", label: "Cache Source" },
-  { key: "model", label: "Model" },
-  { key: "requestedModel", label: "Requested" },
-  { key: "provider", label: "Provider" },
-  { key: "protocol", label: "Req Protocol" },
-  { key: "account", label: "Account" },
-  { key: "apiKey", label: "API Key" },
-  { key: "combo", label: "Combo" },
-  { key: "tokens", label: "Tokens" },
-  { key: "tps", label: "TPS" },
-  { key: "duration", label: "Duration" },
-  { key: "time", label: "Time" },
-];
-
-// Default visible columns will be generated dynamically with translations
+import useEmailPrivacyStore from "@/store/emailPrivacyStore";
 
 /**
  * Get a friendly display label for compatible providers.
@@ -98,45 +72,52 @@ function formatTps(tps: number): string {
 function getCacheSourceMeta(cacheSource: unknown) {
   if (cacheSource === "semantic") {
     return {
-      label: "SEM",
-      title: "Semantic cache hit (served by OmniRoute)",
+      key: "semantic",
       className:
         "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30",
     };
   }
 
   return {
-    label: "UP",
-    title: "Upstream provider response",
+    key: "upstream",
     className: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30",
   };
 }
 
 export default function RequestLoggerV2() {
   const t = useTranslations("requestLogger");
+  const { emailsVisible } = useEmailPrivacyStore();
 
   // Get translated status filters
-  const getStatusFilters = () => [
-    { key: "all", label: t("statusFilters.all"), icon: "" },
-    { key: "error", label: t("statusFilters.error"), icon: "error" },
-    { key: "ok", label: t("statusFilters.success"), icon: "check_circle" },
-    { key: "combo", label: t("statusFilters.combo"), icon: "hub" },
-  ];
+  const statusFilters = useMemo(
+    () => [
+      { key: "all", label: t("statusFilters.all"), icon: "" },
+      { key: "error", label: t("statusFilters.error"), icon: "error" },
+      { key: "ok", label: t("statusFilters.success"), icon: "check_circle" },
+      { key: "combo", label: t("statusFilters.combo"), icon: "hub" },
+    ],
+    [t]
+  );
 
   // Get translated columns
-  const getColumns = () => [
-    { key: "status", label: t("columns.status") },
-    { key: "model", label: t("columns.model") },
-    { key: "requestedModel", label: t("columns.requested") },
-    { key: "provider", label: t("columns.provider") },
-    { key: "protocol", label: t("columns.protocol") },
-    { key: "account", label: t("columns.account") },
-    { key: "apiKey", label: t("columns.apiKey") },
-    { key: "combo", label: t("columns.combo") },
-    { key: "tokens", label: t("columns.tokens") },
-    { key: "duration", label: t("columns.duration") },
-    { key: "time", label: t("columns.time") },
-  ];
+  const columns = useMemo(
+    () => [
+      { key: "status", label: t("columns.status") },
+      { key: "cacheSource", label: t("columns.cacheSource") },
+      { key: "model", label: t("columns.model") },
+      { key: "requestedModel", label: t("columns.requested") },
+      { key: "provider", label: t("columns.provider") },
+      { key: "protocol", label: t("columns.protocol") },
+      { key: "account", label: t("columns.account") },
+      { key: "apiKey", label: t("columns.apiKey") },
+      { key: "combo", label: t("columns.combo") },
+      { key: "tokens", label: t("columns.tokens") },
+      { key: "tps", label: t("columns.tps") },
+      { key: "duration", label: t("columns.duration") },
+      { key: "time", label: t("columns.time") },
+    ],
+    [t]
+  );
 
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -155,11 +136,12 @@ export default function RequestLoggerV2() {
   const [detailLoggingLoading, setDetailLoggingLoading] = useState(false);
   const intervalRef = useRef(null);
   const hasLoadedRef = useRef(false);
+  const logsSignatureRef = useRef("");
   const [providerNodes, setProviderNodes] = useState([]);
 
   // Column visibility with localStorage persistence
   const [visibleColumns, setVisibleColumns] = useState(() => {
-    const defaultVisible = Object.fromEntries(getColumns().map((c) => [c.key, true]));
+    const defaultVisible = Object.fromEntries(columns.map((c) => [c.key, true]));
     if (typeof window === "undefined") return defaultVisible;
     try {
       const saved = localStorage.getItem("loggerVisibleColumns");
@@ -197,7 +179,12 @@ export default function RequestLoggerV2() {
         const res = await fetch(`/api/usage/call-logs?${params}`);
         if (res.ok) {
           const data = await res.json();
-          setLogs(data);
+          // Skip re-render if data hasn't changed (#1369 GPU perf)
+          const sig = JSON.stringify(data.map?.((l: any) => l.id) ?? []);
+          if (sig !== logsSignatureRef.current) {
+            logsSignatureRef.current = sig;
+            setLogs(data);
+          }
         }
       } catch (error) {
         console.error("Failed to fetch call logs:", error);
@@ -319,7 +306,7 @@ export default function RequestLoggerV2() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: nextEnabled }),
       });
-      if (!res.ok) throw new Error("Failed to update pipeline logging");
+      if (!res.ok) throw new Error(t("updatePipelineFailed"));
       setDetailLoggingEnabled(nextEnabled);
     } catch (error) {
       console.error("Failed to toggle pipeline logging:", error);
@@ -375,7 +362,7 @@ export default function RequestLoggerV2() {
               ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300"
               : "bg-bg-subtle border-border text-text-muted"
           }`}
-          title="Capture pipeline payloads for new requests"
+          title={t("capturePipeline")}
         >
           <span
             className={`w-2 h-2 rounded-full ${detailLoggingEnabled ? "bg-amber-500" : "bg-text-muted"}`}
@@ -498,7 +485,7 @@ export default function RequestLoggerV2() {
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value)}
           className="px-3 py-2 rounded-lg bg-bg-subtle border border-border text-sm text-text-primary focus:outline-none focus:border-primary appearance-none cursor-pointer min-w-[150px]"
-          title="Sort logs"
+          title={t("sortLogs")}
         >
           <option value="newest">{t("sortNewest")}</option>
           <option value="oldest">{t("sortOldest")}</option>
@@ -516,7 +503,7 @@ export default function RequestLoggerV2() {
         <button
           onClick={() => fetchLogs(false)}
           className="p-2 rounded-lg hover:bg-bg-subtle text-text-muted hover:text-text-primary transition-colors"
-          title="Refresh"
+          title={t("refresh")}
         >
           <span className="material-symbols-outlined text-[18px]">refresh</span>
         </button>
@@ -525,7 +512,7 @@ export default function RequestLoggerV2() {
       {/* Quick Filters */}
       <div className="flex flex-wrap items-center gap-2">
         {/* Status Filters */}
-        {getStatusFilters().map((f) => (
+        {statusFilters.map((f) => (
           <button
             key={f.key}
             onClick={() => setActiveFilter(activeFilter === f.key ? "all" : f.key)}
@@ -581,8 +568,10 @@ export default function RequestLoggerV2() {
 
       {/* Column Visibility Toggles */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] text-text-muted uppercase tracking-wider mr-1">Columns</span>
-        {getColumns().map((col) => (
+        <span className="text-[10px] text-text-muted uppercase tracking-wider mr-1">
+          {t("columnsLabel")}
+        </span>
+        {columns.map((col) => (
           <button
             key={col.key}
             onClick={() => toggleColumn(col.key)}
@@ -628,7 +617,7 @@ export default function RequestLoggerV2() {
                   )}
                   {visibleColumns.cacheSource && (
                     <th className="px-3 py-2.5 font-semibold text-text-muted uppercase tracking-wider text-[10px]">
-                      Cache Source
+                      {t("columns.cacheSource")}
                     </th>
                   )}
                   {visibleColumns.model && (
@@ -673,7 +662,7 @@ export default function RequestLoggerV2() {
                   )}
                   {visibleColumns.tps && (
                     <th className="px-3 py-2.5 font-semibold text-text-muted uppercase tracking-wider text-[10px] text-right">
-                      TPS
+                      {t("columns.tps")}
                     </th>
                   )}
                   {visibleColumns.duration && (
@@ -692,12 +681,7 @@ export default function RequestLoggerV2() {
                 {sortedLogs.map((log) => {
                   const statusStyle = getStatusStyle(log.status);
                   const protocolKey = log.sourceFormat || log.provider;
-                  const protocol = PROTOCOL_COLORS[protocolKey] ||
-                    PROTOCOL_COLORS[log.provider] || {
-                      bg: "#6B7280",
-                      text: "#fff",
-                      label: (protocolKey || log.provider || "-").toUpperCase(),
-                    };
+                  const protocol = getProtocolColor(protocolKey, log.provider);
                   const compatLabel = getProviderDisplayLabel(log.provider, providerNodes);
                   const providerColor = PROVIDER_COLORS[log.provider] || {
                     bg: "#374151",
@@ -707,6 +691,7 @@ export default function RequestLoggerV2() {
                   const providerLabel = compatLabel || providerColor.label;
                   const isError = log.status >= 400;
                   const cacheSourceMeta = getCacheSourceMeta(log.cacheSource);
+                  const isSemanticCache = cacheSourceMeta.key === "semantic";
 
                   return (
                     <tr
@@ -728,9 +713,9 @@ export default function RequestLoggerV2() {
                         <td className="px-3 py-2">
                           <span
                             className={`inline-block px-2 py-0.5 rounded text-[9px] font-bold uppercase ${cacheSourceMeta.className}`}
-                            title={cacheSourceMeta.title}
+                            title={isSemanticCache ? t("semanticCacheHit") : t("upstreamResponse")}
                           >
-                            {cacheSourceMeta.label === "SEM" ? "Semantic" : "Upstream"}
+                            {isSemanticCache ? t("semantic") : t("upstream")}
                           </span>
                         </td>
                       )}
@@ -750,7 +735,10 @@ export default function RequestLoggerV2() {
                               }
                               title={
                                 log.requestedModel !== log.model
-                                  ? `Requested ${log.requestedModel}, routed as ${log.model}`
+                                  ? t("requestedRoutedTitle", {
+                                      requested: log.requestedModel,
+                                      routed: log.model,
+                                    })
                                   : log.requestedModel
                               }
                             >
@@ -786,13 +774,13 @@ export default function RequestLoggerV2() {
                           className="px-3 py-2 text-text-muted truncate max-w-[120px]"
                           title={log.account}
                         >
-                          {maskAccount(log.account)}
+                          {maskAccount(log.account, emailsVisible)}
                         </td>
                       )}
                       {visibleColumns.apiKey && (
                         <td
                           className="px-3 py-2 text-text-muted truncate max-w-[140px]"
-                          title={log.apiKeyName || log.apiKeyId || "No API key"}
+                          title={log.apiKeyName || log.apiKeyId || t("noApiKey")}
                         >
                           {formatApiKeyLabel(log.apiKeyName, log.apiKeyId)}
                         </td>
@@ -819,6 +807,17 @@ export default function RequestLoggerV2() {
                           <span className="text-emerald-700 dark:text-emerald-400">
                             {log.tokens?.out?.toLocaleString() || 0}
                           </span>
+                          {log.tokens?.compressed != null && log.tokens.compressed > 0 && (
+                            <>
+                              <span className="mx-1 text-border">|</span>
+                              <span
+                                className="text-purple-500 dark:text-purple-400 font-semibold"
+                                title={`${log.tokens.compressed.toLocaleString()} tokens compressed`}
+                              >
+                                ↓{log.tokens.compressed.toLocaleString()}
+                              </span>
+                            </>
+                          )}
                         </td>
                       )}
                       {visibleColumns.tps && (
@@ -874,6 +873,7 @@ export default function RequestLoggerV2() {
           log={selectedLog}
           detail={detailData}
           loading={detailLoading}
+          debugEnabled={detailLoggingEnabled}
           onClose={closeDetail}
           onCopy={copyToClipboard}
         />

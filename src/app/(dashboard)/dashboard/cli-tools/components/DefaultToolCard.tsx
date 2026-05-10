@@ -5,6 +5,10 @@ import { Card, Button, ModelSelectModal } from "@/shared/components";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { copyToClipboard } from "@/shared/utils/clipboard";
+import { buildOpenCodeConfigDocument } from "@/shared/services/opencodeConfig";
+import { useTheme } from "@/shared/hooks/useTheme";
+import { DEFAULT_DISPLAY_BASE_URL } from "@/shared/hooks";
+import ProviderIcon from "@/shared/components/ProviderIcon";
 
 export default function DefaultToolCard({
   toolId,
@@ -31,23 +35,105 @@ export default function DefaultToolCard({
   const [copiedField, setCopiedField] = useState(null);
   const [showModelModal, setShowModelModal] = useState(false);
   const [modelValue, setModelValue] = useState("");
+  const [modelValues, setModelValues] = useState<string[]>([]);
   const [runtimeStatus, setRuntimeStatus] = useState(null);
   const [message, setMessage] = useState(null);
   const [saving, setSaving] = useState(false);
   const runtimeFetchStartedRef = useRef(false);
+  const { isDark } = useTheme();
 
-  // Initialize state directly with computed value
-  const [selectedApiKey, setSelectedApiKey] = useState(() =>
-    apiKeys?.length > 0 ? apiKeys[0].key : ""
+  // (#523) Initialize state with key *id* instead of masked key string
+  const [selectedApiKeyId, setSelectedApiKeyId] = useState(() =>
+    apiKeys?.length > 0 ? apiKeys[0].id : ""
   );
+  const isMultiModelTool = tool.modelSelectionMode === "multiple";
+  const usesOpenCodePreview = tool.previewConfigMode === "opencode";
+  const selectedKeyObj = apiKeys?.find((k) => k.id === selectedApiKeyId);
+
+  const resolveApiKeyValue = useCallback(
+    () => selectedKeyObj?.rawKey || (!cloudEnabled ? "sk_omniroute" : t("yourApiKeyPlaceholder")),
+    [cloudEnabled, selectedKeyObj?.rawKey, t]
+  );
+
+  const getSelectedModelEntries = useCallback(() => {
+    const selectedValues = isMultiModelTool
+      ? modelValues.length > 0
+        ? modelValues
+        : modelValue
+          ? [modelValue]
+          : []
+      : modelValue
+        ? [modelValue]
+        : [];
+
+    const availableModels = Array.isArray(activeProviders)
+      ? activeProviders.flatMap((provider) => provider?.models || [])
+      : [];
+    const modelMap = new Map(
+      availableModels.filter((model) => model?.value).map((model) => [model.value, model])
+    );
+
+    return selectedValues.map((value) => {
+      const matched = modelMap.get(value);
+      return {
+        value,
+        label: matched?.name || matched?.label || value,
+      };
+    });
+  }, [activeProviders, isMultiModelTool, modelValue, modelValues]);
+
+  const getSelectedModelLabels = useCallback(
+    () => getSelectedModelEntries().map((entry) => entry.label),
+    [getSelectedModelEntries]
+  );
+
+  const getSelectedModelLabelMap = useCallback(
+    () => Object.fromEntries(getSelectedModelEntries().map((entry) => [entry.value, entry.label])),
+    [getSelectedModelEntries]
+  );
+
+  const normalizedBaseUrl = baseUrl || DEFAULT_DISPLAY_BASE_URL;
+  const baseUrlWithV1 = normalizedBaseUrl.endsWith("/v1")
+    ? normalizedBaseUrl
+    : `${normalizedBaseUrl}/v1`;
 
   // Persist and restore model selection per tool via localStorage
   useEffect(() => {
     const savedModel = localStorage.getItem(`omniroute-cli-model-${toolId}`);
-    if (savedModel) setModelValue(savedModel);
+    if (savedModel) {
+      if (isMultiModelTool) {
+        try {
+          const parsed = JSON.parse(savedModel);
+          if (Array.isArray(parsed)) {
+            const normalized = parsed.map((value) => String(value || "").trim()).filter(Boolean);
+            setModelValues(normalized);
+            setModelValue(normalized[0] || "");
+          } else {
+            setModelValue(savedModel);
+            setModelValues([savedModel]);
+          }
+        } catch {
+          setModelValue(savedModel);
+          setModelValues([savedModel]);
+        }
+      } else {
+        setModelValue(savedModel);
+      }
+    }
     const savedKey = localStorage.getItem(`omniroute-cli-key-${toolId}`);
-    if (savedKey && apiKeys?.some((k) => k.key === savedKey)) setSelectedApiKey(savedKey);
-  }, [toolId, apiKeys]);
+    // (#523) localStorage may contain a masked key string from before the fix —
+    // match by prefix/suffix against known keys to find the id.
+    if (savedKey && apiKeys?.length > 0) {
+      const prefix = savedKey.slice(0, 8);
+      const suffix = savedKey.slice(-4);
+      const matchedKey = apiKeys.find(
+        (k) =>
+          (k.rawKey && k.rawKey.startsWith(prefix) && k.rawKey.endsWith(suffix)) ||
+          (k.key && k.key.startsWith(prefix) && k.key.endsWith(suffix))
+      );
+      if (matchedKey) setSelectedApiKeyId(matchedKey.id);
+    }
+  }, [toolId, apiKeys, isMultiModelTool]);
 
   const handleModelChange = useCallback(
     (value) => {
@@ -61,10 +147,29 @@ export default function DefaultToolCard({
     [toolId]
   );
 
+  const handleModelValuesChange = useCallback(
+    (values) => {
+      const normalized = Array.isArray(values)
+        ? [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))]
+        : [];
+
+      setModelValues(normalized);
+      setModelValue(normalized[0] || "");
+
+      if (normalized.length > 0) {
+        localStorage.setItem(`omniroute-cli-model-${toolId}`, JSON.stringify(normalized));
+      } else {
+        localStorage.removeItem(`omniroute-cli-model-${toolId}`);
+      }
+    },
+    [toolId]
+  );
+
   const handleApiKeyChange = useCallback(
     (value) => {
-      setSelectedApiKey(value);
+      setSelectedApiKeyId(value);
       if (value) {
+        // (#523) Store the key id in localStorage for persistence
         localStorage.setItem(`omniroute-cli-key-${toolId}`, value);
       }
     },
@@ -79,26 +184,19 @@ export default function DefaultToolCard({
       .then((res) => res.json())
       .then((data) => setRuntimeStatus(data))
       .catch((error) => setRuntimeStatus({ error: error?.message || t("runtimeCheckFailed") }));
-  }, [isExpanded, runtimeStatus, toolId]);
+  }, [isExpanded, runtimeStatus, t, toolId]);
 
-  const replaceVars = (text) => {
-    const keyToUse =
-      selectedApiKey && selectedApiKey.trim()
-        ? selectedApiKey
-        : !cloudEnabled
-          ? "sk_omniroute"
-          : t("yourApiKeyPlaceholder");
+  const replaceVars = useCallback(
+    (text) => {
+      const keyToUse = resolveApiKeyValue();
 
-    const normalizedBaseUrl = baseUrl || "http://localhost:20128";
-    const baseUrlWithV1 = normalizedBaseUrl.endsWith("/v1")
-      ? normalizedBaseUrl
-      : `${normalizedBaseUrl}/v1`;
-
-    return text
-      .replace(/\{\{baseUrl\}\}/g, baseUrlWithV1)
-      .replace(/\{\{apiKey\}\}/g, keyToUse)
-      .replace(/\{\{model\}\}/g, modelValue || t("modelPlaceholder"));
-  };
+      return text
+        .replace(/\{\{baseUrl\}\}/g, baseUrlWithV1)
+        .replace(/\{\{apiKey\}\}/g, keyToUse)
+        .replace(/\{\{model\}\}/g, getSelectedModelLabels()[0] || t("modelPlaceholder"));
+    },
+    [baseUrl, getSelectedModelLabels, resolveApiKeyValue, t]
+  );
 
   const handleCopy = async (text, field) => {
     await copyToClipboard(replaceVars(text));
@@ -106,8 +204,54 @@ export default function DefaultToolCard({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  const getSelectedModels = useCallback(() => {
+    if (!isMultiModelTool) return modelValue ? [modelValue] : [];
+    return modelValues.length > 0 ? modelValues : modelValue ? [modelValue] : [];
+  }, [isMultiModelTool, modelValue, modelValues]);
+
+  const getRenderedCodeBlock = useCallback(() => {
+    if (!tool.codeBlock?.code) return "";
+    if (!usesOpenCodePreview) return replaceVars(tool.codeBlock.code);
+
+    const keyToUse = resolveApiKeyValue();
+    return JSON.stringify(
+      buildOpenCodeConfigDocument({
+        baseUrl: baseUrlWithV1,
+        apiKey: keyToUse,
+        models: getSelectedModels(),
+        model: getSelectedModels()[0],
+        modelLabels: getSelectedModelLabelMap(),
+      }),
+      null,
+      2
+    );
+  }, [
+    baseUrl,
+    getSelectedModels,
+    getSelectedModelLabelMap,
+    replaceVars,
+    resolveApiKeyValue,
+    tool.codeBlock?.code,
+    usesOpenCodePreview,
+  ]);
+
   const handleSelectModel = (model) => {
-    handleModelChange(model.value);
+    if (!isMultiModelTool) {
+      handleModelChange(model.value);
+      return;
+    }
+
+    if (!model) {
+      handleModelValuesChange([]);
+      return;
+    }
+
+    if (modelValues.includes(model.value)) {
+      handleModelValuesChange(modelValues.filter((value) => value !== model.value));
+      return;
+    }
+
+    handleModelValuesChange([...modelValues, model.value]);
   };
 
   const hasActiveProviders = activeProviders.length > 0;
@@ -118,32 +262,31 @@ export default function DefaultToolCard({
     setSaving(true);
     setMessage(null);
     try {
-      const keyToUse =
-        selectedApiKey && selectedApiKey.trim()
-          ? selectedApiKey
-          : !cloudEnabled
-            ? "sk_omniroute"
-            : "";
-
-      const normalizedBaseUrl = baseUrl || "http://localhost:20128";
-      const baseUrlWithV1 = normalizedBaseUrl.endsWith("/v1")
-        ? normalizedBaseUrl
-        : `${normalizedBaseUrl}/v1`;
+      // (#523) Prefer keyId lookup so the backend writes the real key to disk.
+      const selectedKeyId = selectedApiKeyId?.trim() || null;
 
       const res = await fetch(`/api/cli-tools/guide-settings/${toolId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           baseUrl: baseUrlWithV1,
-          apiKey: keyToUse,
+          apiKey: !cloudEnabled ? "sk_omniroute" : null,
+          keyId: selectedKeyId,
           model: modelValue,
+          models: isMultiModelTool ? getSelectedModels() : undefined,
+          modelLabels: getSelectedModelLabelMap(),
         }),
       });
       const data = await res.json();
       if (res.ok) {
         setMessage({ type: "success", text: data.message || t("configurationSaved") });
       } else {
-        setMessage({ type: "error", text: data.error || t("failedToSave") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedToSave"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -153,7 +296,7 @@ export default function DefaultToolCard({
   };
 
   // Check if this tool supports direct config file write
-  const supportsDirectSave = ["continue", "opencode"].includes(toolId);
+  const supportsDirectSave = ["continue", "opencode", "qwen"].includes(toolId);
 
   const renderApiKeySelector = () => {
     return (
@@ -161,18 +304,20 @@ export default function DefaultToolCard({
         {apiKeys && apiKeys.length > 0 ? (
           <>
             <select
-              value={selectedApiKey}
+              value={selectedApiKeyId}
               onChange={(e) => handleApiKeyChange(e.target.value)}
               className="flex-1 px-3 py-2 bg-bg-secondary rounded-lg text-sm border border-border focus:outline-none focus:ring-1 focus:ring-primary/50"
             >
               {apiKeys.map((key) => (
-                <option key={key.id} value={key.key}>
+                <option key={key.id} value={key.id}>
                   {key.key}
                 </option>
               ))}
             </select>
             <button
-              onClick={() => handleCopy(selectedApiKey, "apiKey")}
+              onClick={() => {
+                handleCopy(resolveApiKeyValue(), "apiKey");
+              }}
               className="shrink-0 px-3 py-2 bg-bg-secondary hover:bg-bg-tertiary rounded-lg border border-border transition-colors"
             >
               <span className="material-symbols-outlined text-lg">
@@ -190,12 +335,25 @@ export default function DefaultToolCard({
   };
 
   const renderModelSelector = () => {
+    const displayValue = isMultiModelTool
+      ? getSelectedModelLabels().join(", ")
+      : getSelectedModelLabels()[0] || "";
+
     return (
       <div className="mt-2 flex items-center gap-2">
         <input
           type="text"
-          value={modelValue}
-          onChange={(e) => handleModelChange(e.target.value)}
+          value={displayValue}
+          onChange={(e) =>
+            isMultiModelTool
+              ? handleModelValuesChange(
+                  e.target.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean)
+                )
+              : handleModelChange(e.target.value)
+          }
           placeholder={t("modelPlaceholder")}
           className="flex-1 px-3 py-2 bg-bg-secondary rounded-lg text-sm border border-border focus:outline-none focus:ring-1 focus:ring-primary/50"
         />
@@ -210,10 +368,10 @@ export default function DefaultToolCard({
         >
           {t("selectModel")}
         </button>
-        {modelValue && (
+        {displayValue && (
           <>
             <button
-              onClick={() => handleCopy(modelValue, "model")}
+              onClick={() => handleCopy(displayValue, "model")}
               className="shrink-0 px-3 py-2 bg-bg-secondary hover:bg-bg-tertiary rounded-lg border border-border transition-colors"
             >
               <span className="material-symbols-outlined text-lg">
@@ -221,7 +379,9 @@ export default function DefaultToolCard({
               </span>
             </button>
             <button
-              onClick={() => handleModelChange("")}
+              onClick={() =>
+                isMultiModelTool ? handleModelValuesChange([]) : handleModelChange("")
+              }
               className="p-2 text-text-muted hover:text-red-500 rounded transition-colors"
               title={t("clear")}
             >
@@ -356,7 +516,9 @@ export default function DefaultToolCard({
                 </p>
                 {item.desc && (
                   <p className="text-sm text-text-muted mt-0.5">
-                    {translateOrFallback(`guides.${toolId}.steps.${item.step}.desc`, item.desc)}
+                    {translateOrFallback(`guides.${toolId}.steps.${item.step}.desc`, item.desc, {
+                      baseUrl: baseUrlWithV1,
+                    })}
                   </p>
                 )}
                 {item.type === "apiKeySelector" && renderApiKeySelector()}
@@ -389,7 +551,7 @@ export default function DefaultToolCard({
                 {tool.codeBlock.language}
               </span>
               <button
-                onClick={() => handleCopy(tool.codeBlock.code, "codeblock")}
+                onClick={() => handleCopy(getRenderedCodeBlock(), "codeblock")}
                 className="flex items-center gap-1 px-2 py-1 text-xs bg-bg-secondary hover:bg-bg-tertiary rounded border border-border transition-colors"
               >
                 <span className="material-symbols-outlined text-sm">
@@ -399,9 +561,7 @@ export default function DefaultToolCard({
               </button>
             </div>
             <pre className="p-4 bg-bg-secondary rounded-lg border border-border overflow-x-auto">
-              <code className="text-sm font-mono whitespace-pre">
-                {replaceVars(tool.codeBlock.code)}
-              </code>
+              <code className="text-sm font-mono whitespace-pre">{getRenderedCodeBlock()}</code>
             </pre>
           </div>
         )}
@@ -425,7 +585,7 @@ export default function DefaultToolCard({
                   variant="primary"
                   size="sm"
                   onClick={handleSaveConfig}
-                  disabled={!modelValue}
+                  disabled={isMultiModelTool ? getSelectedModels().length === 0 : !modelValue}
                   loading={saving}
                 >
                   <span className="material-symbols-outlined text-[14px] mr-1">save</span>
@@ -436,7 +596,7 @@ export default function DefaultToolCard({
                 <Button
                   variant={supportsDirectSave ? "outline" : "primary"}
                   size="sm"
-                  onClick={() => handleCopy(tool.codeBlock.code, "codeblock")}
+                  onClick={() => handleCopy(getRenderedCodeBlock(), "codeblock")}
                 >
                   <span className="material-symbols-outlined text-[14px] mr-1">
                     {copiedField === "codeblock" ? "check" : "content_copy"}
@@ -444,7 +604,7 @@ export default function DefaultToolCard({
                   {copiedField === "codeblock" ? t("copied") : t("copyConfig")}
                 </Button>
               )}
-              {modelValue && (
+              {(isMultiModelTool ? getSelectedModels().length > 0 : !!modelValue) && (
                 <span className="text-xs text-text-muted flex items-center gap-1">
                   <span className="material-symbols-outlined text-[14px] text-green-500">
                     check_circle
@@ -475,6 +635,24 @@ export default function DefaultToolCard({
         />
       );
     }
+    if (tool.imageLight || tool.imageDark) {
+      const themedSrc = isDark
+        ? tool.imageDark || tool.imageLight
+        : tool.imageLight || tool.imageDark;
+      return (
+        <Image
+          src={themedSrc}
+          alt={tool.name}
+          width={32}
+          height={32}
+          className="size-8 object-contain rounded-lg"
+          sizes="32px"
+          onError={(e) => {
+            (e.currentTarget as HTMLElement).style.display = "none";
+          }}
+        />
+      );
+    }
     if (tool.icon) {
       return (
         <span className="material-symbols-outlined text-xl" style={{ color: tool.color }}>
@@ -482,19 +660,7 @@ export default function DefaultToolCard({
         </span>
       );
     }
-    return (
-      <Image
-        src={`/providers/${toolId}.png`}
-        alt={tool.name}
-        width={32}
-        height={32}
-        className="size-8 object-contain rounded-lg"
-        sizes="32px"
-        onError={(e) => {
-          (e.currentTarget as HTMLElement).style.display = "none";
-        }}
-      />
-    );
+    return <ProviderIcon providerId={toolId} size={32} type="color" />;
   };
 
   return (
@@ -569,8 +735,11 @@ export default function DefaultToolCard({
         onClose={() => setShowModelModal(false)}
         onSelect={handleSelectModel}
         selectedModel={modelValue}
+        selectedModels={isMultiModelTool ? getSelectedModels() : []}
         activeProviders={activeProviders}
         title={t("selectModel")}
+        multiSelect={isMultiModelTool}
+        showCombos={!tool.hideComboModels}
       />
     </Card>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Button, Select, Badge } from "@/shared/components";
 import { ALIAS_TO_ID } from "@/shared/constants/providers";
@@ -10,6 +10,9 @@ import dynamic from "next/dynamic";
 
 const Editor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 const SearchPlayground = dynamic(() => import("./SearchPlayground"), {
+  ssr: false,
+});
+const ChatPlayground = dynamic(() => import("./ChatPlayground"), {
   ssr: false,
 });
 
@@ -185,18 +188,22 @@ export default function PlaygroundPage() {
   const t = useTranslations("playground");
 
   // Get translated endpoint options
-  const getEndpointOptions = () => [
-    { value: "chat", label: t("endpointOptions.chat") },
-    { value: "responses", label: t("endpointOptions.responses") },
-    { value: "images", label: t("endpointOptions.images") },
-    { value: "embeddings", label: t("endpointOptions.embeddings") },
-    { value: "speech", label: t("endpointOptions.speech") },
-    { value: "transcription", label: t("endpointOptions.transcription") },
-    { value: "video", label: t("endpointOptions.video") },
-    { value: "music", label: t("endpointOptions.music") },
-    { value: "rerank", label: t("endpointOptions.rerank") },
-    { value: "search", label: t("endpointOptions.search") },
-  ];
+  const endpointOptions = useMemo(
+    () => [
+      { value: "conversational", label: "Chat (Conversational)" },
+      { value: "chat", label: t("endpointOptions.chat") },
+      { value: "responses", label: t("endpointOptions.responses") },
+      { value: "images", label: t("endpointOptions.images") },
+      { value: "embeddings", label: t("endpointOptions.embeddings") },
+      { value: "speech", label: t("endpointOptions.speech") },
+      { value: "transcription", label: t("endpointOptions.transcription") },
+      { value: "video", label: t("endpointOptions.video") },
+      { value: "music", label: t("endpointOptions.music") },
+      { value: "rerank", label: t("endpointOptions.rerank") },
+      { value: "search", label: t("endpointOptions.search") },
+    ],
+    [t]
+  );
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderOption[]>([]);
@@ -220,10 +227,19 @@ export default function PlaygroundPage() {
   const [uploadedImages, setUploadedImages] = useState<string[]>([]); // base64 URIs for vision
 
   const isSearchEndpoint = selectedEndpoint === "search";
+  const isConversationalEndpoint = selectedEndpoint === "conversational";
   const isTranscriptionEndpoint = selectedEndpoint === "transcription";
   const isChatEndpoint = selectedEndpoint === "chat";
   const isImageEndpoint = selectedEndpoint === "images";
   const supportsVision = isChatEndpoint && isVisionModel(selectedModel);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+    };
+  }, [audioUrl]);
 
   // Load connections for a given provider — filtered from allConnections
   const providerConnections = allConnections.filter((c) => {
@@ -495,13 +511,13 @@ export default function PlaygroundPage() {
             <Select
               value={selectedEndpoint}
               onChange={(e: any) => handleEndpointChange(e.target.value)}
-              options={getEndpointOptions()}
+              options={endpointOptions}
               className="w-full"
             />
           </div>
 
           {/* Provider — hidden in search mode */}
-          {!isSearchEndpoint && (
+          {!isSearchEndpoint && !isConversationalEndpoint && (
             <div className="flex-1 w-full">
               <label className="block text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">
                 {t("provider")}
@@ -516,7 +532,7 @@ export default function PlaygroundPage() {
           )}
 
           {/* Model — hidden in search mode */}
-          {!isSearchEndpoint && (
+          {!isSearchEndpoint && !isConversationalEndpoint && (
             <div className="flex-1 w-full">
               <label className="block text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">
                 {t("model")}
@@ -531,7 +547,7 @@ export default function PlaygroundPage() {
           )}
 
           {/* Account/Key — always shown when provider is selected */}
-          {!isSearchEndpoint && (
+          {!isSearchEndpoint && !isConversationalEndpoint && (
             <div className="flex-1 w-full">
               <label className="block text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">
                 {t("accountKey")}
@@ -558,7 +574,7 @@ export default function PlaygroundPage() {
           )}
 
           {/* Send Button — hidden in search mode (SearchPlayground has its own) */}
-          {!isSearchEndpoint && (
+          {!isSearchEndpoint && !isConversationalEndpoint && (
             <div className="shrink-0">
               {loading ? (
                 <Button icon="stop" variant="secondary" onClick={handleCancel}>
@@ -581,9 +597,27 @@ export default function PlaygroundPage() {
         </div>
       </Card>
 
-      {/* Search mode — isolated sub-component */}
+      {/* Isolated sub-components */}
       {isSearchEndpoint ? (
         <SearchPlayground />
+      ) : isConversationalEndpoint ? (
+        <ChatPlayground
+          selectedProvider={selectedProvider}
+          selectedModel={selectedModel}
+          selectedConnection={selectedConnection}
+          models={models}
+          providers={providers}
+          providerConnections={providerConnections}
+          onProviderChange={handleProviderChange}
+          onModelChange={handleModelChange}
+          onConnectionChange={setSelectedConnection}
+          noAccountsString={t("noAccounts")}
+          autoAccountsString={
+            providerConnections.length > 0
+              ? t("autoAccounts", { count: providerConnections.length })
+              : ""
+          }
+        />
       ) : (
         <>
           {/* File Upload Zone — shown for transcription and vision models */}

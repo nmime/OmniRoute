@@ -14,7 +14,7 @@ const {
   refreshQwenToken,
   refreshCodexToken,
   refreshKiroToken,
-  refreshIflowToken,
+  refreshQoderToken,
   refreshGitHubToken,
   refreshCopilotToken,
   supportsTokenRefresh,
@@ -24,12 +24,33 @@ const {
   getAllAccessTokens,
   isProviderBlocked,
   getCircuitBreakerStatus,
+  getConnectionRefreshMutexStatus,
   refreshWithRetry,
 } = tokenRefresh;
 
-function createLog() {
-  const entries = [];
-  const push = (level, args) => {
+type LogLevel = "debug" | "info" | "warn" | "error";
+type LogEntry = {
+  level: LogLevel;
+  scope: unknown;
+  message: unknown;
+  meta: unknown;
+};
+type MockLogger = {
+  entries: LogEntry[];
+  debug: (...args: [unknown?, unknown?, unknown?]) => void;
+  info: (...args: [unknown?, unknown?, unknown?]) => void;
+  warn: (...args: [unknown?, unknown?, unknown?]) => void;
+  error: (...args: [unknown?, unknown?, unknown?]) => void;
+};
+
+type TestFetch = typeof fetch;
+type FastSetTimeout = typeof globalThis.setTimeout & {
+  __promisify__?: typeof globalThis.setTimeout.__promisify__;
+};
+
+function createLog(): MockLogger {
+  const entries: LogEntry[] = [];
+  const push = (level: LogLevel, args: [unknown?, unknown?, unknown?]) => {
     const [scope, message, meta] = args;
     entries.push({ level, scope, message, meta });
   };
@@ -43,27 +64,27 @@ function createLog() {
   };
 }
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body: any, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
 }
 
-function textResponse(text, status = 400) {
+function textResponse(text: any, status = 400) {
   return new Response(text, {
     status,
     headers: { "content-type": "text/plain" },
   });
 }
 
-function bodyToString(body) {
+function bodyToString(body: BodyInit | null | undefined) {
   if (typeof body === "string") return body;
   if (body instanceof URLSearchParams) return body.toString();
   return String(body ?? "");
 }
 
-async function withMockedFetch(fetchImpl, fn) {
+async function withMockedFetch<TResult>(fetchImpl: TestFetch, fn: () => Promise<TResult>) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
   try {
@@ -73,7 +94,7 @@ async function withMockedFetch(fetchImpl, fn) {
   }
 }
 
-async function withMockedNow(now, fn) {
+async function withMockedNow<TResult>(now: number, fn: () => Promise<TResult>) {
   const originalNow = Date.now;
   Date.now = () => now;
   try {
@@ -83,11 +104,19 @@ async function withMockedNow(now, fn) {
   }
 }
 
-async function withPatchedProperties(target, patch, fn) {
-  const previous = new Map();
+async function withPatchedProperties<TResult>(
+  target: object,
+  patch: Record<string, unknown>,
+  fn: () => Promise<TResult>
+) {
+  const previous = new Map<string, unknown>();
+  const targetRecord = target as Record<string, unknown>;
   for (const [key, value] of Object.entries(patch)) {
-    previous.set(key, Object.prototype.hasOwnProperty.call(target, key) ? target[key] : undefined);
-    target[key] = value;
+    previous.set(
+      key,
+      Object.prototype.hasOwnProperty.call(targetRecord, key) ? targetRecord[key] : undefined
+    );
+    targetRecord[key] = value;
   }
 
   try {
@@ -96,18 +125,22 @@ async function withPatchedProperties(target, patch, fn) {
     for (const [key] of Object.entries(patch)) {
       const prior = previous.get(key);
       if (prior === undefined) {
-        delete target[key];
+        delete targetRecord[key];
       } else {
-        target[key] = prior;
+        targetRecord[key] = prior;
       }
     }
   }
 }
 
-async function withFastRetryTimers(fn) {
-  const originalSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (callback, delay = 0, ...args) =>
-    originalSetTimeout(callback, delay === 30_000 ? delay : 0, ...args);
+async function withFastRetryTimers<TResult>(fn: () => Promise<TResult>) {
+  const originalSetTimeout = globalThis.setTimeout as FastSetTimeout;
+  const fastSetTimeout: FastSetTimeout = Object.assign(
+    ((callback: TimerHandler, delay = 0, ...args: unknown[]) =>
+      originalSetTimeout(callback, delay === 30_000 ? delay : 0, ...args)) as typeof setTimeout,
+    { __promisify__: originalSetTimeout.__promisify__ }
+  );
+  globalThis.setTimeout = fastSetTimeout;
   try {
     return await fn();
   } finally {
@@ -146,7 +179,7 @@ test("refreshAccessToken returns null when refresh token is missing", async () =
 
 test("refreshAccessToken posts form data and returns rotated tokens", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withPatchedProperties(
     PROVIDERS,
@@ -214,7 +247,7 @@ test("refreshAccessToken returns null on upstream refresh failure", async () => 
 
 test("refreshClineToken handles nested payloads and computes expiresIn", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedNow(1_700_000_000_000, async () => {
     await withMockedFetch(
@@ -230,9 +263,9 @@ test("refreshClineToken handles nested payloads and computes expiresIn", async (
       },
       async () => {
         const result = await refreshClineToken("refresh-cline", log);
-        assert.equal(result.accessToken, "cline-access");
-        assert.equal(result.refreshToken, "cline-refresh");
-        assert.equal(result.expiresIn, 95);
+        assert.equal(result?.accessToken, "cline-access");
+        assert.equal(result?.refreshToken, "cline-refresh");
+        assert.equal(result?.expiresIn, 95);
       }
     );
   });
@@ -247,7 +280,7 @@ test("refreshClineToken handles nested payloads and computes expiresIn", async (
 
 test("refreshKimiCodingToken adds provider-specific headers and fields", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -281,7 +314,7 @@ test("refreshKimiCodingToken adds provider-specific headers and fields", async (
 
 test("refreshClaudeOAuthToken posts the anthropic oauth refresh contract", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -310,7 +343,7 @@ test("refreshClaudeOAuthToken posts the anthropic oauth refresh contract", async
 
 test("refreshGoogleToken exchanges refresh tokens against the shared google endpoint", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -382,14 +415,17 @@ test("refreshCodexToken recognizes refresh_token_reused responses", async () => 
     async () => textResponse(JSON.stringify({ error: { code: "refresh_token_reused" } }), 400),
     async () => {
       const result = await refreshCodexToken("codex-refresh", log);
-      assert.deepEqual(result, { error: "refresh_token_reused" });
+      assert.deepEqual(result, {
+        error: "unrecoverable_refresh_error",
+        code: "refresh_token_reused",
+      });
     }
   );
 });
 
 test("refreshKiroToken uses the AWS OIDC flow when client credentials are present", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -429,9 +465,50 @@ test("refreshKiroToken uses the AWS OIDC flow when client credentials are presen
   });
 });
 
+test("refreshKiroToken uses stored region for AWS OIDC refresh without authMethod", async () => {
+  const log = createLog();
+  const calls: any[] = [];
+
+  await withMockedFetch(
+    async (url, options = {}) => {
+      calls.push({ url, options });
+      return jsonResponse({
+        accessToken: "kiro-aws-access",
+        refreshToken: "kiro-aws-refresh-next",
+        expiresIn: 900,
+      });
+    },
+    async () => {
+      const result = await refreshKiroToken(
+        "kiro-refresh",
+        {
+          clientId: "aws-client",
+          clientSecret: "aws-secret",
+          region: "ap-southeast-1",
+        },
+        log
+      );
+
+      assert.deepEqual(result, {
+        accessToken: "kiro-aws-access",
+        refreshToken: "kiro-aws-refresh-next",
+        expiresIn: 900,
+      });
+    }
+  );
+
+  assert.equal(calls[0].url, "https://oidc.ap-southeast-1.amazonaws.com/token");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    clientId: "aws-client",
+    clientSecret: "aws-secret",
+    refreshToken: "kiro-refresh",
+    grantType: "refresh_token",
+  });
+});
+
 test("refreshKiroToken falls back to the social-auth refresh endpoint", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -458,9 +535,9 @@ test("refreshKiroToken falls back to the social-auth refresh endpoint", async ()
   });
 });
 
-test("refreshIflowToken uses basic auth once qoder oauth settings are configured", async () => {
+test("refreshQoderToken uses basic auth once qoder oauth settings are configured", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withPatchedProperties(
     PROVIDERS.qoder,
@@ -485,7 +562,7 @@ test("refreshIflowToken uses basic auth once qoder oauth settings are configured
               });
             },
             async () => {
-              const result = await refreshIflowToken("qoder-refresh", log);
+              const result = await refreshQoderToken("qoder-refresh", log);
               assert.deepEqual(result, {
                 accessToken: "qoder-access",
                 refreshToken: "qoder-refresh-next",
@@ -504,7 +581,7 @@ test("refreshIflowToken uses basic auth once qoder oauth settings are configured
 
 test("refreshGitHubToken exchanges the refresh token with github oauth", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withPatchedProperties(
     PROVIDERS.github,
@@ -540,7 +617,7 @@ test("refreshGitHubToken exchanges the refresh token with github oauth", async (
 
 test("refreshCopilotToken returns the short-lived copilot token", async () => {
   const log = createLog();
-  const calls = [];
+  const calls: any[] = [];
 
   await withMockedFetch(
     async (url, options = {}) => {
@@ -573,6 +650,7 @@ test("supportsTokenRefresh, isUnrecoverableRefreshError and formatProviderCreden
     },
     async () => {
       assert.equal(supportsTokenRefresh("claude"), true);
+      assert.equal(supportsTokenRefresh("amazon-q"), true);
       assert.equal(supportsTokenRefresh("custom-oauth-task-207"), true);
       assert.equal(supportsTokenRefresh("missing-provider"), false);
     }
@@ -663,7 +741,7 @@ test("getAccessToken cleans the in-flight cache after resolve and separates diff
     },
     async () => {
       await withMockedFetch(
-        async (_url, options = {}) => {
+        async (_url, options: RequestInit = {}) => {
           fetchCount += 1;
           const refreshToken = new URLSearchParams(bodyToString(options.body)).get("refresh_token");
           return jsonResponse({
@@ -716,7 +794,7 @@ test("getAllAccessTokens refreshes only active connections with providers", asyn
     },
     async () => {
       await withMockedFetch(
-        async (_url, options = {}) => {
+        async (_url, options: RequestInit = {}) => {
           fetchCount += 1;
           const refreshToken = new URLSearchParams(bodyToString(options.body)).get("refresh_token");
           return jsonResponse({
@@ -823,10 +901,223 @@ test("isProviderBlocked clears expired circuit-breaker entries once cooldown pas
     await refreshWithRetry(async () => null, 1, log, provider);
   }
 
-  const blockedUntil = Date.parse(getCircuitBreakerStatus()[provider].blockedUntil);
+  const blockedUntil = Date.parse(getCircuitBreakerStatus()[provider].blockedUntil as string);
 
   await withMockedNow(blockedUntil + 1, async () => {
     assert.equal(isProviderBlocked(provider), false);
     assert.equal(getCircuitBreakerStatus()[provider], undefined);
   });
+});
+
+// ─── Per-connection mutex tests ────────────────────────────────────────────────
+
+test("getAccessToken per-connection mutex: 5 concurrent callers fire exactly one upstream call", async () => {
+  const log = createLog();
+  let upstreamCallCount = 0;
+
+  await withPatchedProperties(
+    PROVIDERS,
+    { "custom-oauth-conn-mutex": { tokenUrl: "https://auth.example.com/token" } },
+    async () => {
+      await withMockedFetch(
+        async () => {
+          upstreamCallCount++;
+          // Simulate 50ms upstream latency so all 5 callers are concurrent
+          await new Promise((r) => setTimeout(r, 50));
+          return jsonResponse({
+            access_token: "new-access-token",
+            refresh_token: "new-refresh-token",
+            expires_in: 3600,
+          });
+        },
+        async () => {
+          const credentials = {
+            connectionId: "conn-abc-123",
+            refreshToken: "old-refresh-token",
+          };
+
+          const results = await Promise.all([
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+          ]);
+
+          assert.equal(upstreamCallCount, 1, "upstream called exactly once");
+          for (const result of results) {
+            assert.equal(result?.accessToken, "new-access-token", "all callers got same token");
+            assert.equal(result?.refreshToken, "new-refresh-token");
+          }
+          // All results are the same object reference (shared promise)
+          assert.strictEqual(results[0], results[1]);
+          assert.strictEqual(results[1], results[4]);
+        }
+      );
+    }
+  );
+});
+
+test("getAccessToken per-connection mutex: logs concurrent refresh with waiter count", async () => {
+  const log = createLog();
+
+  await withPatchedProperties(
+    PROVIDERS,
+    { "custom-oauth-conn-mutex": { tokenUrl: "https://auth.example.com/token" } },
+    async () => {
+      await withMockedFetch(
+        async () => {
+          await new Promise((r) => setTimeout(r, 20));
+          return jsonResponse({ access_token: "tok", refresh_token: "rtok", expires_in: 600 });
+        },
+        async () => {
+          const credentials = { connectionId: "conn-log-test", refreshToken: "rt" };
+          await Promise.all([
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+          ]);
+
+          const concurrentLogs = log.entries.filter(
+            (e) =>
+              e.level === "info" &&
+              e.message === "Concurrent refresh detected — sharing in-flight refresh"
+          );
+          assert.ok(concurrentLogs.length >= 1, "logged at least one concurrent refresh event");
+          assert.ok(
+            concurrentLogs.some((e) => e.meta?.connectionId === "conn-log-test"),
+            "log includes connectionId"
+          );
+          assert.ok(
+            concurrentLogs.some((e) => typeof e.meta?.waiters === "number" && e.meta.waiters >= 1),
+            "log includes waiter count"
+          );
+        }
+      );
+    }
+  );
+});
+
+test("getAccessToken per-connection mutex: failed refresh propagates null to all waiters (idempotent error)", async () => {
+  const log = createLog();
+
+  await withPatchedProperties(
+    PROVIDERS,
+    { "custom-oauth-conn-mutex": { tokenUrl: "https://auth.example.com/token" } },
+    async () => {
+      await withMockedFetch(
+        async () => {
+          await new Promise((r) => setTimeout(r, 20));
+          // 400 response causes refreshAccessToken to return null
+          return new Response("bad_request", { status: 400 });
+        },
+        async () => {
+          const credentials = { connectionId: "conn-fail-test", refreshToken: "expired-rt" };
+          const results = await Promise.all([
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+            getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log),
+          ]);
+
+          for (const result of results) {
+            assert.equal(result, null, "failed refresh returns null to all waiters");
+          }
+          // Mutex cleaned up after failure
+          assert.equal(
+            getConnectionRefreshMutexStatus()["conn-fail-test"],
+            undefined,
+            "mutex entry removed after failure"
+          );
+        }
+      );
+    }
+  );
+});
+
+test("getAccessToken per-connection mutex: different connections run independently", async () => {
+  const log = createLog();
+  let upstreamCallCount = 0;
+
+  await withPatchedProperties(
+    PROVIDERS,
+    { "custom-oauth-conn-mutex": { tokenUrl: "https://auth.example.com/token" } },
+    async () => {
+      await withMockedFetch(
+        async () => {
+          upstreamCallCount++;
+          await new Promise((r) => setTimeout(r, 20));
+          return jsonResponse({
+            access_token: `access-${upstreamCallCount}`,
+            refresh_token: `refresh-${upstreamCallCount}`,
+            expires_in: 600,
+          });
+        },
+        async () => {
+          const [groupA, groupB] = await Promise.all([
+            Promise.all([
+              getAccessToken(
+                "custom-oauth-conn-mutex",
+                { connectionId: "conn-A", refreshToken: "rt-a" },
+                log
+              ),
+              getAccessToken(
+                "custom-oauth-conn-mutex",
+                { connectionId: "conn-A", refreshToken: "rt-a" },
+                log
+              ),
+            ]),
+            Promise.all([
+              getAccessToken(
+                "custom-oauth-conn-mutex",
+                { connectionId: "conn-B", refreshToken: "rt-b" },
+                log
+              ),
+              getAccessToken(
+                "custom-oauth-conn-mutex",
+                { connectionId: "conn-B", refreshToken: "rt-b" },
+                log
+              ),
+            ]),
+          ]);
+
+          assert.equal(upstreamCallCount, 2, "one upstream call per distinct connection");
+          assert.strictEqual(groupA[0], groupA[1], "conn-A callers share same result");
+          assert.strictEqual(groupB[0], groupB[1], "conn-B callers share same result");
+          assert.notStrictEqual(groupA[0], groupB[0], "conn-A and conn-B got different results");
+        }
+      );
+    }
+  );
+});
+
+test("getAccessToken per-connection mutex: mutex cleared after success, next call re-fires upstream", async () => {
+  const log = createLog();
+  let upstreamCallCount = 0;
+
+  await withPatchedProperties(
+    PROVIDERS,
+    { "custom-oauth-conn-mutex": { tokenUrl: "https://auth.example.com/token" } },
+    async () => {
+      await withMockedFetch(
+        async () => {
+          upstreamCallCount++;
+          return jsonResponse({
+            access_token: `access-${upstreamCallCount}`,
+            refresh_token: `refresh-${upstreamCallCount}`,
+            expires_in: 600,
+          });
+        },
+        async () => {
+          const credentials = { connectionId: "conn-refire", refreshToken: "rt" };
+
+          const first = await getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log);
+          const second = await getAccessToken("custom-oauth-conn-mutex", { ...credentials }, log);
+
+          assert.equal(upstreamCallCount, 2, "each sequential call fires upstream once");
+          assert.equal(first?.accessToken, "access-1");
+          assert.equal(second?.accessToken, "access-2");
+        }
+      );
+    }
+  );
 });

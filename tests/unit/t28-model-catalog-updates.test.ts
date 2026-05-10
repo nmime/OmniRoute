@@ -17,14 +17,17 @@ test("T28: gemini-cli catalog includes preview models, gemini uses API sync", ()
   assert.ok(geminiCliIds.includes("gemini-3-flash-preview"));
 });
 
-test("T28: antigravity static catalog exposes current Gemini 3.1 model IDs", () => {
+test("T28: antigravity static catalog exposes client-visible Gemini preview IDs", () => {
   const staticIds = (getStaticModelsForProvider("antigravity") || []).map((m) => m.id);
 
-  assert.ok(staticIds.includes("gemini-3.1-pro-high"));
+  assert.ok(staticIds.includes("gemini-3-pro-preview"));
   assert.ok(staticIds.includes("gemini-3.1-pro-low"));
-  assert.ok(staticIds.includes("gemini-3-flash"));
+  assert.ok(staticIds.includes("gemini-3-flash-preview"));
   assert.ok(!staticIds.includes("gemini-3-pro-high"));
-  assert.ok(!staticIds.includes("gemini-3-pro-low"));
+  assert.ok(!staticIds.includes("gemini-3.1-pro-high"));
+  assert.ok(!staticIds.includes("gemini-claude-sonnet-4-5"));
+  assert.ok(!staticIds.includes("gemini-claude-sonnet-4-5-thinking"));
+  assert.ok(!staticIds.includes("gemini-claude-opus-4-5-thinking"));
 });
 
 test("T28: github registry exposes Gemini 3.1 Pro Preview and keeps legacy alias compatibility", async () => {
@@ -51,15 +54,16 @@ test("T28: qwen registry uses native chat.qwen.ai base URL", () => {
 test("T28: vertex catalog includes partner models when vertex executor is available", () => {
   const vertexIds = REGISTRY.vertex.models.map((m) => m.id);
 
-  assert.ok(vertexIds.includes("deepseek-v3.2"));
-  assert.ok(vertexIds.includes("qwen3-next-80b"));
-  assert.ok(vertexIds.includes("glm-5"));
+  assert.ok(vertexIds.includes("DeepSeek-V4-Flash"));
+  assert.ok(vertexIds.includes("DeepSeek-V4-Pro"));
+  assert.ok(vertexIds.includes("Qwen3.6-35B-A3B"));
+  assert.ok(vertexIds.includes("GLM-5.1-FP8"));
 });
 
 test("T28: new catalog models resolve through getModelInfoCore", async () => {
-  const minimax = await getModelInfoCore("minimax/minimax-m2.7", {});
+  const minimax = await getModelInfoCore("minimax/MiniMax-M2.7", {});
   assert.equal(minimax.provider, "minimax");
-  assert.equal(minimax.model, "minimax-m2.7");
+  assert.equal(minimax.model, "MiniMax-M2.7");
 
   const flashLite = await getModelInfoCore("gemini/gemini-3.1-flash-lite-preview", {});
   assert.equal(flashLite.provider, "gemini");
@@ -69,7 +73,7 @@ test("T28: new catalog models resolve through getModelInfoCore", async () => {
   assert.equal(flashPreview.provider, "gemini");
   assert.equal(flashPreview.model, "gemini-3-flash-preview");
 
-  const vertexPartner = await getModelInfoCore("vertex/qwen3-next-80b", {});
+  const vertexPartner = await getModelInfoCore("vertex/Qwen3.6-35B-A3B", {});
   assert.equal(vertexPartner.provider, "vertex");
-  assert.equal(vertexPartner.model, "qwen3-next-80b");
+  assert.equal(vertexPartner.model, "Qwen3.6-35B-A3B");
 });

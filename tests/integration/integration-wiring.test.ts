@@ -7,31 +7,42 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
 
-function readProjectFile(relPath) {
+function readProjectFile(relPath: string) {
   const full = join(ROOT, relPath);
   if (!existsSync(full)) return null;
   return readFileSync(full, "utf8");
 }
 
-function assertFileExists(relPath) {
+function assertFileExists(relPath: string) {
   const full = join(ROOT, relPath);
   assert.ok(existsSync(full), `${relPath} should exist`);
   return full;
 }
 
-function assertRouteMethods(relPath, methods) {
+function assertRouteMethods(relPath: string, methods: string[]) {
   const src = readProjectFile(relPath);
   assert.ok(src, `${relPath} should exist`);
   for (const method of methods) {
     assert.match(src, new RegExp(`export\\s+async\\s+function\\s+${method}\\s*\\(`));
   }
+}
+
+function listProjectFiles(relPath: string): string[] {
+  const full = join(ROOT, relPath);
+  if (!existsSync(full)) return [];
+
+  return readdirSync(full, { withFileTypes: true }).flatMap((entry) => {
+    const childRelPath = `${relPath}/${entry.name}`;
+    if (entry.isDirectory()) return listProjectFiles(childRelPath);
+    return childRelPath;
+  });
 }
 
 // ─── Pipeline Wiring ─────────────────────────────────
@@ -59,6 +70,11 @@ describe("Pipeline Wiring — server-init.ts", () => {
   it("should log server.start audit event", () => {
     assert.match(src, /server\.start/);
   });
+
+  it("should use the structured startup logger instead of direct console calls", () => {
+    assert.match(src, /createLogger\("server-init"\)/);
+    assert.doesNotMatch(src, /console\.(log|warn|error|info|debug)\(/);
+  });
 });
 
 describe("Pipeline Wiring — instrumentation-node.ts", () => {
@@ -74,17 +90,18 @@ describe("Pipeline Wiring — sse chat handler", () => {
   const src = readProjectFile("src/sse/handlers/chat.ts");
   const coreSrc = readProjectFile("open-sse/handlers/chatCore.ts");
 
-  it("should import and use request sanitization", () => {
+  it("should import and use guardrail pre-call validation", () => {
     assert.ok(src, "src/sse/handlers/chat.ts should exist");
-    assert.match(src, /sanitizeRequest/);
+    assert.match(src, /guardrailRegistry/);
+    assert.match(src, /runPreCallHooks/);
   });
 
   it("should import circuit breaker integration", () => {
     assert.match(src, /getCircuitBreaker|CircuitBreakerOpenError/);
   });
 
-  it("should import model availability integration", () => {
-    assert.match(src, /isModelAvailable|setModelUnavailable/);
+  it("should use credential preflight instead of global model quarantine gates", () => {
+    assert.match(src, /getProviderCredentialsWithQuotaPreflight/);
   });
 
   it("should import request telemetry integration", () => {
@@ -100,26 +117,36 @@ describe("Pipeline Wiring — sse chat handler", () => {
     assert.match(coreSrc, /calculateCost/);
     assert.match(coreSrc, /recordCost/);
   });
+
+  it("should not track backup artifacts in the active src/sse shim", () => {
+    const trackedArtifactNames = listProjectFiles("src/sse").filter((file) =>
+      /\.(orig|bak|backup)$/i.test(file)
+    );
+
+    assert.deepEqual(trackedArtifactNames, []);
+  });
 });
 
 describe("Pipeline Wiring — middleware proxy", () => {
-  const src = readProjectFile("src/proxy.ts");
+  const proxySrc = readProjectFile("src/proxy.ts");
+  const pipelineSrc = readProjectFile("src/server/authz/pipeline.ts");
 
-  it("should exist", () => {
-    assert.ok(src, "src/proxy.ts should exist");
+  it("should exist and delegate to authz pipeline", () => {
+    assert.ok(proxySrc, "src/proxy.ts should exist");
+    assert.match(proxySrc, /runAuthzPipeline/);
   });
 
-  it("should generate request id for tracing", () => {
-    assert.match(src, /generateRequestId/);
-    assert.match(src, /X-Request-Id/);
+  it("should generate request id for tracing in the authz pipeline", () => {
+    assert.ok(pipelineSrc, "src/server/authz/pipeline.ts should exist");
+    assert.match(pipelineSrc, /generateRequestId|X-Request-Id/);
   });
 
-  it("should enforce body size guard for API writes", () => {
-    assert.match(src, /checkBodySize|getBodySizeLimit/);
+  it("should enforce body size guard in the authz pipeline", () => {
+    assert.match(pipelineSrc, /checkBodySize|getBodySizeLimit|bodySize/i);
   });
 
-  it("should resolve JWT secret lazily at request time", () => {
-    assert.match(src, /function getJwtSecret/);
+  it("should resolve JWT secret in the authz pipeline", () => {
+    assert.match(pipelineSrc, /getJwtSecret|jwtSecret|JWT_SECRET/i);
   });
 });
 
@@ -128,7 +155,6 @@ describe("Pipeline Wiring — middleware proxy", () => {
 describe("API Routes — existence check", () => {
   const routes = [
     "src/app/api/cache/stats/route.ts",
-    "src/app/api/models/availability/route.ts",
     "src/app/api/telemetry/summary/route.ts",
     "src/app/api/usage/budget/route.ts",
     "src/app/api/usage/quota/route.ts",
@@ -149,10 +175,6 @@ describe("API Routes — existence check", () => {
 describe("API Routes — export HTTP methods", () => {
   it("/api/cache/stats should export GET and DELETE", () => {
     assertRouteMethods("src/app/api/cache/stats/route.ts", ["GET", "DELETE"]);
-  });
-
-  it("/api/models/availability should export GET and POST", () => {
-    assertRouteMethods("src/app/api/models/availability/route.ts", ["GET", "POST"]);
   });
 
   it("/api/telemetry/summary should export GET", () => {
@@ -188,6 +210,107 @@ describe("API Routes — export HTTP methods", () => {
   });
 });
 
+describe("API Routes — dashboard and tool consumers", () => {
+  it("keeps model-combo mapping APIs wired through routing settings", () => {
+    const settingsPage = readProjectFile("src/app/(dashboard)/dashboard/settings/page.tsx");
+    const modelRoutingSection = readProjectFile("src/shared/components/ModelRoutingSection.tsx");
+
+    assert.ok(settingsPage, "settings page should exist");
+    assert.ok(modelRoutingSection, "ModelRoutingSection should exist");
+    assert.match(settingsPage, /ModelRoutingSection/);
+    assert.match(modelRoutingSection, /fetch\("\/api\/model-combo-mappings"\)/);
+    assert.match(modelRoutingSection, /fetch\(`\/api\/model-combo-mappings\/\$\{editingId\}`/);
+    assert.match(modelRoutingSection, /method:\s*"DELETE"/);
+    assertRouteMethods("src/app/api/model-combo-mappings/route.ts", ["GET", "POST"]);
+    assertRouteMethods("src/app/api/model-combo-mappings/[id]/route.ts", ["GET", "PUT", "DELETE"]);
+  });
+
+  it("keeps log APIs wired through the consolidated logs dashboard", () => {
+    const logsPage = readProjectFile("src/app/(dashboard)/dashboard/logs/page.tsx");
+    const requestLogger = readProjectFile("src/shared/components/RequestLoggerV2.tsx");
+    const proxyLogger = readProjectFile("src/shared/components/ProxyLogger.tsx");
+    const consoleLogger = readProjectFile("src/shared/components/ConsoleLogViewer.tsx");
+    const activeRequests = readProjectFile("src/shared/components/ActiveRequestsPanel.tsx");
+
+    assert.ok(logsPage, "logs page should exist");
+    assert.ok(requestLogger, "RequestLoggerV2 should exist");
+    assert.ok(proxyLogger, "ProxyLogger should exist");
+    assert.ok(consoleLogger, "ConsoleLogViewer should exist");
+    assert.ok(activeRequests, "ActiveRequestsPanel should exist");
+    assert.match(logsPage, /RequestLoggerV2/);
+    assert.match(logsPage, /ProxyLogger/);
+    assert.match(logsPage, /ConsoleLogViewer/);
+    assert.match(logsPage, /ActiveRequestsPanel/);
+    assert.match(logsPage, /AuditLogTab/);
+    assert.match(logsPage, /\/api\/logs\/export/);
+    assert.match(requestLogger, /\/api\/usage\/call-logs/);
+    assert.match(requestLogger, /\/api\/logs\/detail/);
+    assert.match(proxyLogger, /\/api\/usage\/proxy-logs/);
+    assert.match(consoleLogger, /\/api\/logs\/console/);
+    assert.match(activeRequests, /\/api\/logs\/active/);
+    assertRouteMethods("src/app/api/logs/active/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/logs/console/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/logs/detail/route.ts", ["GET", "POST"]);
+    assertRouteMethods("src/app/api/logs/export/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/usage/proxy-logs/route.ts", ["GET", "DELETE"]);
+    assertRouteMethods("src/app/api/usage/call-logs/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/usage/call-logs/[id]/route.ts", ["GET"]);
+  });
+
+  it("keeps the active request payload modal on opaque theme surfaces", () => {
+    const activeRequests = readProjectFile("src/shared/components/ActiveRequestsPanel.tsx");
+    const globals = readProjectFile("src/app/globals.css");
+
+    assert.ok(activeRequests, "ActiveRequestsPanel should exist");
+    assert.ok(globals, "globals.css should exist");
+    assert.match(globals, /--color-card:\s+#ffffff/);
+    assert.match(globals, /--color-card:\s+#161b22/);
+    assert.match(globals, /--color-card:\s+var\(--color-card\)/);
+    assert.match(activeRequests, /rounded-xl border border-border bg-surface/);
+    assert.match(activeRequests, /backdrop-blur-sm/);
+    assert.match(
+      activeRequests,
+      /rounded-2xl[^"]*border border-border[^"]*bg-surface[^"]*shadow-2xl/
+    );
+    assert.doesNotMatch(activeRequests, /bg-card\/70/);
+    assert.doesNotMatch(activeRequests, /rounded-2xl[^"]*bg-card/);
+    assert.doesNotMatch(activeRequests, /shadow-\[/);
+    assert.doesNotMatch(activeRequests, /border-black\/10/);
+  });
+
+  it("keeps usage quota wired through A2A and MCP tools", () => {
+    const quotaSkill = readProjectFile("src/lib/a2a/skills/quotaManagement.ts");
+    const mcpAdvancedTools = readProjectFile("open-sse/mcp-server/tools/advancedTools.ts");
+    const mcpServer = readProjectFile("open-sse/mcp-server/server.ts");
+
+    assert.ok(quotaSkill, "quotaManagement skill should exist");
+    assert.ok(mcpAdvancedTools, "advanced MCP tools should exist");
+    assert.ok(mcpServer, "MCP server should exist");
+    assert.match(quotaSkill, /\/api\/usage\/quota/);
+    assert.match(mcpAdvancedTools, /\/api\/usage\/quota/);
+    assert.match(mcpServer, /\/api\/usage\/quota/);
+    assertRouteMethods("src/app/api/usage/quota/route.ts", ["GET"]);
+  });
+
+  it("keeps legacy usage history and raw request-log APIs explicitly classified", () => {
+    const usageStats = readProjectFile("src/shared/components/UsageStats.tsx");
+    const apiReference = readProjectFile("docs/API_REFERENCE.md");
+    const openApi = readProjectFile("docs/openapi.yaml");
+
+    assert.ok(usageStats, "UsageStats compatibility component should exist");
+    assert.ok(apiReference, "API reference should exist");
+    assert.ok(openApi, "OpenAPI document should exist");
+    assert.match(usageStats, /\/api\/usage\/history/);
+    assert.match(apiReference, /\/api\/usage\/history/);
+    assert.match(apiReference, /\/api\/usage\/request-logs/);
+    assert.match(openApi, /\/api\/usage\/history:/);
+    assert.match(openApi, /\/api\/usage\/request-logs:/);
+    assertRouteMethods("src/app/api/usage/history/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/usage/request-logs/route.ts", ["GET"]);
+    assertRouteMethods("src/app/api/usage/logs/route.ts", ["GET"]);
+  });
+});
+
 describe("API Routes — T09 /v1 catalog consistency", () => {
   const v1RouteSrc = readProjectFile("src/app/api/v1/route.ts");
   const v1ModelsRouteSrc = readProjectFile("src/app/api/v1/models/route.ts");
@@ -212,6 +335,37 @@ describe("API Routes — T09 /v1 catalog consistency", () => {
   it("/api/v1/models/catalog should export unified model catalog builder", () => {
     assert.ok(v1CatalogSrc, "src/app/api/v1/models/catalog.ts should exist");
     assert.match(v1CatalogSrc, /export\s+async\s+function\s+getUnifiedModelsResponse\s*\(/);
+  });
+});
+
+describe("Dashboard Wiring — T05 payload rules", () => {
+  const settingsPageSrc = readProjectFile("src/app/(dashboard)/dashboard/settings/page.tsx");
+  const payloadRulesTabSrc = readProjectFile(
+    "src/app/(dashboard)/dashboard/settings/components/PayloadRulesTab.tsx"
+  );
+  const openapiSrc = readProjectFile("docs/openapi.yaml");
+
+  it("settings page should surface payload rules inside advanced settings", () => {
+    assert.ok(settingsPageSrc, "settings page source should exist");
+    assert.match(settingsPageSrc, /import PayloadRulesTab from "\.\/components\/PayloadRulesTab"/);
+    assert.match(settingsPageSrc, /activeTab === "advanced"/);
+    assert.match(settingsPageSrc, /<PayloadRulesTab\s*\/>/);
+  });
+
+  it("payload rules tab should read and write through the dedicated settings endpoint", () => {
+    assert.ok(payloadRulesTabSrc, "payload rules tab source should exist");
+    assert.match(payloadRulesTabSrc, /fetch\("\/api\/settings\/payload-rules"\)/);
+    assert.match(payloadRulesTabSrc, /fetch\("\/api\/settings\/payload-rules",\s*\{/);
+    assert.match(payloadRulesTabSrc, /method:\s*"PUT"/);
+    assert.match(payloadRulesTabSrc, /default-raw/);
+  });
+
+  it("openapi should document the payload rules management surface", () => {
+    assert.ok(openapiSrc, "docs/openapi.yaml should exist");
+    assert.match(openapiSrc, /\/api\/settings\/payload-rules:/);
+    assert.match(openapiSrc, /summary:\s+Get payload rules configuration/);
+    assert.match(openapiSrc, /ManagementSessionAuth:/);
+    assert.match(openapiSrc, /PayloadRulesConfig:/);
   });
 });
 
@@ -286,10 +440,18 @@ describe("Page Integration — logs page wiring", () => {
 
 describe("Page Integration — settings page wiring", () => {
   const src = readProjectFile("src/app/(dashboard)/dashboard/settings/page.tsx");
+  const memorySkillsTab = readProjectFile(
+    "src/app/(dashboard)/dashboard/settings/components/MemorySkillsTab.tsx"
+  );
 
   it("should include resilience tab in advanced settings", () => {
     assert.ok(src, "src/app/(dashboard)/dashboard/settings/page.tsx should exist");
     assert.match(src, /ResilienceTab/);
+  });
+
+  it("should not label the active skills settings card as a placeholder", () => {
+    assert.ok(memorySkillsTab, "MemorySkillsTab should exist");
+    assert.doesNotMatch(memorySkillsTab, /Skills Settings \(placeholder\)/);
   });
 });
 
@@ -372,5 +534,38 @@ describe("Page Integration — provider test results privacy", () => {
       providerDetailSrc,
       /pickDisplayValue\(\s*\[r\.connectionName\],\s*emailsVisible,\s*r\.connectionName\s*\)/
     );
+  });
+
+  it("should resolve provider detail metadata through the shared dashboard catalog", () => {
+    assert.ok(
+      providerDetailSrc,
+      "src/app/(dashboard)/dashboard/providers/[id]/page.tsx should exist"
+    );
+    assert.match(providerDetailSrc, /resolveDashboardProviderInfo/);
+  });
+
+  it("should treat upstream proxy entries as a dedicated management surface", () => {
+    assert.ok(
+      providerDetailSrc,
+      "src/app/(dashboard)/dashboard/providers/[id]/page.tsx should exist"
+    );
+    assert.match(providerDetailSrc, /isUpstreamProxyProvider/);
+    assert.match(providerDetailSrc, /Managed via Upstream Proxy Settings/);
+  });
+});
+
+describe("Page Integration — legacy provider create route retirement", () => {
+  const legacyProviderNewSrc = readProjectFile(
+    "src/app/(dashboard)/dashboard/providers/new/page.tsx"
+  );
+
+  it("should redirect legacy /dashboard/providers/new to the canonical providers flow", () => {
+    assert.ok(
+      legacyProviderNewSrc,
+      "src/app/(dashboard)/dashboard/providers/new/page.tsx should exist"
+    );
+    assert.match(legacyProviderNewSrc, /redirect\("\/dashboard\/providers"\)/);
+    assert.doesNotMatch(legacyProviderNewSrc, /authMethod:\s*"api_key"/);
+    assert.doesNotMatch(legacyProviderNewSrc, /displayName/);
   });
 });

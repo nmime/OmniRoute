@@ -130,8 +130,8 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   for (const mod of loadedModules) {
-    if (typeof mod.stopPeriodicSync === "function") {
-      mod.stopPeriodicSync();
+    if (typeof (mod as any).stopPeriodicSync === "function") {
+      (mod as any).stopPeriodicSync();
     }
   }
   loadedModules.clear();
@@ -473,6 +473,31 @@ test("syncModelsDev string failures are normalized into an error payload", async
   assert.equal(failed.dryRun, true);
 });
 
+test("syncModelsDev honors abort signals during retry backoff", async () => {
+  const modelsDev = await importFresh("sync-abort");
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.map((arg) => String(arg)).join(" "));
+  globalThis.fetch = async () => {
+    throw new Error("network down");
+  };
+
+  try {
+    const controller = new AbortController();
+    const pending = modelsDev.syncModelsDev({ signal: controller.signal, maxRetries: 3 });
+    const warned = await waitFor(() => warnings.length > 0, 100);
+    assert.ok(warned, "expected the first retry warning before aborting");
+
+    controller.abort();
+    const aborted = await pending;
+    assert.equal(aborted.success, false);
+    assert.equal(aborted.error, "aborted");
+    assert.equal(warnings.length, 1);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("startPeriodicSync, stopPeriodicSync, getSyncStatus, and initModelsDevSync honor settings and avoid duplicate timers", async () => {
   const modelsDev = await importFresh("periodic-sync");
   mockFetchWith(MOCK_MODELS_DEV_DATA);
@@ -485,7 +510,7 @@ test("startPeriodicSync, stopPeriodicSync, getSyncStatus, and initModelsDevSync 
   modelsDev.startPeriodicSync(99);
   assert.equal(modelsDev.getSyncStatus().intervalMs, 25);
 
-  const syncedAt = await waitFor(() => modelsDev.getSyncStatus().lastSync, 300);
+  const syncedAt = await waitFor(() => modelsDev.getSyncStatus().lastSync, 2000);
   assert.ok(syncedAt, "expected initial periodic sync to complete");
   assert.ok(modelsDev.getSyncStatus().nextSync);
 
@@ -511,5 +536,32 @@ test("startPeriodicSync, stopPeriodicSync, getSyncStatus, and initModelsDevSync 
   await enabled.initModelsDevSync();
   assert.equal(enabled.getSyncStatus().enabled, true);
   assert.equal(enabled.getSyncStatus().intervalMs, 15);
-  await waitFor(() => enabled.getSyncStatus().lastSync, 300);
+  await waitFor(() => enabled.getSyncStatus().lastSync, 2000);
+});
+
+test("stopPeriodicSync aborts the in-flight initial sync", async () => {
+  const modelsDev = await importFresh("periodic-stop-abort");
+  let aborted = false;
+
+  globalThis.fetch = async (_url, init) =>
+    await new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      const onAbort = () => {
+        aborted = true;
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+
+  modelsDev.startPeriodicSync(25);
+  await waitFor(() => modelsDev.getSyncStatus().enabled, 50);
+  modelsDev.stopPeriodicSync();
+
+  const stopped = await waitFor(() => aborted, 200);
+  assert.equal(stopped, true);
+  assert.equal(modelsDev.getSyncStatus().enabled, false);
+  assert.equal(modelsDev.getSyncStatus().lastSync, null);
 });

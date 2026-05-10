@@ -130,28 +130,28 @@ _Connect any AI-powered IDE or CLI tool through OmniRoute — free API gateway f
       </td>
       <td align="center" width="110">
         <a href="https://github.com/openai/codex">
-          <img src="./public/providers/codex.png" alt="Codex CLI" width="48"/><br/>
+          <img src="./public/providers/codex.svg" alt="Codex CLI" width="48"/><br/>
           <b>Codex CLI</b>
         </a><br/>
         <sub>⭐ 60.8K</sub>
       </td>
       <td align="center" width="110">
         <a href="https://github.com/anthropics/claude-code">
-          <img src="./public/providers/claude.png" alt="Claude Code" width="48"/><br/>
+          <img src="./public/providers/claude.svg" alt="Claude Code" width="48"/><br/>
           <b>Claude Code</b>
         </a><br/>
         <sub>⭐ 67.3K</sub>
       </td>
       <td align="center" width="110">
         <a href="https://github.com/google-gemini/gemini-cli">
-          <img src="./public/providers/gemini-cli.png" alt="Gemini CLI" width="48"/><br/>
+          <img src="./public/providers/gemini-cli.svg" alt="Gemini CLI" width="48"/><br/>
           <b>Gemini CLI</b>
         </a><br/>
         <sub>⭐ 94.7K</sub>
       </td>
       <td align="center" width="110">
         <a href="https://github.com/Kilo-Org/kilocode">
-          <img src="./public/providers/kilocode.png" alt="Kilo Code" width="48"/><br/>
+          <img src="./public/providers/kilocode.svg" alt="Kilo Code" width="48"/><br/>
           <b>Kilo Code</b>
         </a><br/>
         <sub>⭐ 15.5K</sub>
@@ -391,10 +391,10 @@ When a call fails, the dev doesn't know if it was a rate limit, expired token, w
 
 - **Unified Logs Dashboard** — 4 tabs: Request Logs, Proxy Logs, Audit Logs, Console
 - **Console Log Viewer** — Real-time terminal-style viewer with color-coded levels, auto-scroll, search, filter
-- **SQLite Proxy Logs** — Persistent logs that survive server restarts
+- **SQLite Summary Logs** — Request and proxy log indexes stay queryable across restarts without loading large payload blobs into SQLite
 - **Translator Playground** — 4 debugging modes: Playground (format translation), Chat Tester (round-trip), Test Bench (batch), Live Monitor (real-time)
 - **Request Telemetry** — p50/p95/p99 latency + X-Request-Id tracing
-- **File-Based Logging with Rotation** — App logs rotate by size, retention days, and archive count; call log artifacts rotate by retention days and file count
+- **File-Based Detail Artifacts** — App logs rotate by size, retention days, and archive count; detailed request/response payloads live in `DATA_DIR/call_logs/` and rotate independently of SQLite summaries
 - **System Info Report** — `npm run system-info` generates `system-info.txt` with your full environment (Node version, OmniRoute version, OS, CLI tools, Docker/PM2 status). Attach it when reporting issues for instant triage.
 
 </details>
@@ -699,7 +699,7 @@ During deep debugging, long histories with tool results quickly exceed provider 
 
 ```txt
 Combo: "maximize-claude"
-  1. cc/claude-opus-4-6
+  1. cc/claude-opus-4-7
   2. glm/glm-4.7
   3. if/kimi-k2-thinking
 
@@ -723,7 +723,7 @@ Outcome: stable free coding workflow
 
 ```txt
 Combo: "always-on"
-  1. cc/claude-opus-4-6
+  1. cc/claude-opus-4-7
   2. cx/gpt-5.2-codex
   3. glm/glm-4.7
   4. minimax/MiniMax-M2.1
@@ -1452,7 +1452,8 @@ OmniRoute v3.6 is built as an operational platform, not just a relay proxy.
 
 | Feature                             | What It Does                                                                            |
 | ----------------------------------- | --------------------------------------------------------------------------------------- |
-| 🔌 **Circuit Breakers**             | Per-model trip/recover with threshold controls                                          |
+| 🔌 **Circuit Breakers**             | Per-provider and per-model trip/recover with 10-minute cooldowns                        |
+| 🔒 **Daily Quota Lock** 🆕          | Detects exhaustion signals and locks routing for the specific model until midnight      |
 | 🎯 **Endpoint-Aware Models**        | Custom models declare supported endpoints + API format                                  |
 | 🛡️ **Anti-Thundering Herd**         | Mutex + semaphore protections on retry/rate events                                      |
 | 🧠 **Semantic + Signature Cache**   | Cost/latency reduction with two cache layers                                            |
@@ -1478,7 +1479,8 @@ OmniRoute v3.6 is built as an operational platform, not just a relay proxy.
 | Feature                          | What It Does                                          |
 | -------------------------------- | ----------------------------------------------------- |
 | 📝 **Request + Proxy Logging**   | Full request/response and proxy logging               |
-| 📉 **Streamed Detailed Logs** 🆕 | Reconstructs SSE payload streams cleanly into the UI  |
+| 📉 **Streamed Detailed Logs**    | Reconstructs SSE payload streams cleanly into the UI  |
+| 🏷️ **Real-Time Model Badges** 🆕 | Live model status and daily quota countdown timers    |
 | 📋 **Unified Logs Dashboard**    | Request, proxy, audit, and console views in one page  |
 | 🔍 **Request Telemetry**         | p50/p95/p99 latency and request tracing               |
 | 🏥 **Health Dashboard**          | Uptime, breaker states, lockouts, cache stats         |
@@ -1515,7 +1517,7 @@ OmniRoute v3.6 is built as an operational platform, not just a relay proxy.
 
 ```txt
 Combo: "my-coding-stack"
-  1. cc/claude-opus-4-6
+  1. cc/claude-opus-4-7
   2. nvidia/llama-3.3-70b
   3. glm/glm-4.7
   4. if/kimi-k2-thinking
@@ -1654,7 +1656,7 @@ Dashboard → Providers → Connect Claude Code
 → 5-hour + weekly quota tracking
 
 Models:
-  cc/claude-opus-4-6
+  cc/claude-opus-4-7
   cc/claude-sonnet-4-5-20250929
   cc/claude-haiku-4-5-20251001
 ```
@@ -1854,7 +1856,7 @@ Dashboard → Combos → Create New
 
 Name: premium-coding
 Models:
-  1. cc/claude-opus-4-6 (Subscription primary)
+  1. cc/claude-opus-4-7 (Subscription primary)
   2. glm/glm-4.7 (Cheap backup, $0.6/1M)
   3. minimax/MiniMax-M2.1 (Cheapest fallback, $0.20/1M)
 
@@ -1884,7 +1886,7 @@ Cost: $0 forever!
 Settings → Models → Advanced:
   OpenAI API Base URL: http://localhost:20128/v1
   OpenAI API Key: [from OmniRoute dashboard]
-  Model: cc/claude-opus-4-6
+  Model: cc/claude-opus-4-7
 ```
 
 ### Claude Code
@@ -1994,7 +1996,7 @@ opencode
 **Rate limiting**
 
 - Subscription quota out → Fallback to GLM/MiniMax
-- Add combo: `cc/claude-opus-4-6 → glm/glm-4.7 → if/kimi-k2-thinking`
+- Add combo: `cc/claude-opus-4-7 → glm/glm-4.7 → if/kimi-k2-thinking`
 
 **OAuth token expired**
 
@@ -2027,8 +2029,10 @@ opencode
 
 **No request logs**
 
-- Request artifacts are written to `DATA_DIR/call_logs/` as one JSON file per request
+- `call_logs` in SQLite stores summary metadata for the Request Logs table and analytics views
+- Detailed request/response payloads are written to `DATA_DIR/call_logs/` as one JSON artifact per request
 - Enable pipeline capture from Dashboard → Logs → Request Logs if you need detailed per-stage payloads
+- `Export Logs` reads the artifact files on demand, while `Export All` includes the `call_logs/` directory alongside `storage.sqlite`
 - Set `APP_LOG_TO_FILE=true` if you also want application console logs in `logs/application/app.log`
 - Adjust `APP_LOG_MAX_FILE_SIZE`, `APP_LOG_RETENTION_DAYS`, `APP_LOG_MAX_FILES`, and `CALL_LOG_MAX_ENTRIES` as needed
 
@@ -2258,7 +2262,7 @@ Se não quiser criar credenciais próprias agora, ainda é possível usar o flux
 | [API Reference](docs/API_REFERENCE.md)                   | All endpoints with examples                         |
 | [MCP Server](open-sse/mcp-server/README.md)              | 25 MCP tools, IDE configs, Python/TS/Go clients     |
 | [A2A Server](src/lib/a2a/README.md)                      | JSON-RPC 2.0 protocol, skills, streaming, task mgmt |
-| [Auto-Combo Engine](docs/auto-combo.md)                  | 6-factor scoring, mode packs, self-healing          |
+| [Auto-Combo Engine](docs/AUTO-COMBO.md)                  | 6-factor scoring, mode packs, self-healing          |
 | [Context Relay](docs/features/context-relay.md)          | Session handoff strategy for account rotation       |
 | [Troubleshooting](docs/TROUBLESHOOTING.md)               | Common problems and solutions                       |
 | [Architecture](docs/ARCHITECTURE.md)                     | System architecture and internals                   |
@@ -2324,9 +2328,23 @@ gh release create v2.0.0 --title "v2.0.0" --generate-notes
 
 ## 📊 Star History
 
-## Stargazers over time
+<a href="https://www.star-history.com/?repos=diegosouzapw%2Fomniroute&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=diegosouzapw/omniroute&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=diegosouzapw/omniroute&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=diegosouzapw/omniroute&type=date&legend=top-left" />
+ </picture>
+</a>
 
-## [![Stargazers over time](https://starchart.cc/diegosouzapw/OmniRoute.svg?variant=adaptive)](https://starchart.cc/diegosouzapw/OmniRoute)
+## 🌍 StarMapper
+
+<a href="https://starmapper.bruniaux.com/diegosouzapw/omniroute">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://starmapper.bruniaux.com/api/map-image/diegosouzapw/omniroute?theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://starmapper.bruniaux.com/api/map-image/diegosouzapw/omniroute?theme=light" />
+    <img alt="StarMapper" src="https://starmapper.bruniaux.com/api/map-image/diegosouzapw/omniroute" />
+  </picture>
+</a>
 
 ## 🙏 Acknowledgments
 

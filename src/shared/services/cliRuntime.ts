@@ -15,6 +15,7 @@ const CLI_TOOLS: Record<string, any> = {
     healthcheckTimeoutMs: 4000,
     paths: {
       settings: ".claude/settings.json",
+      auth: [".claude/.credentials.json", ".config/claude/credentials.json"],
     },
   },
   codex: {
@@ -109,6 +110,22 @@ const CLI_TOOLS: Record<string, any> = {
       config: ".config/opencode/opencode.json",
     },
   },
+  hermes: {
+    defaultCommand: "hermes",
+    envBinKey: "CLI_HERMES_BIN",
+    requiresBinary: false,
+    healthcheckTimeoutMs: 4000,
+    paths: {
+      config: ".config/hermes/config.json",
+    },
+  },
+  amp: {
+    defaultCommand: "amp",
+    envBinKey: "CLI_AMP_BIN",
+    requiresBinary: true,
+    healthcheckTimeoutMs: 12000,
+    paths: {},
+  },
   qoder: {
     defaultCommand: "qodercli",
     envBinKey: "CLI_QODER_BIN",
@@ -159,7 +176,15 @@ const parseBoolean = (value: unknown, defaultValue = true) => {
 const runProcess = (
   command: string,
   args: string[],
-  { env, timeoutMs = 3000 }: { env?: Record<string, string | undefined>; timeoutMs?: number } = {}
+  {
+    env,
+    timeoutMs = 3000,
+    useShell = isWindows(),
+  }: {
+    env?: Record<string, string | undefined>;
+    timeoutMs?: number;
+    useShell?: boolean;
+  } = {}
 ): Promise<any> =>
   new Promise((resolve) => {
     let stdout = "";
@@ -173,7 +198,7 @@ const runProcess = (
       // On Windows, npm installs CLI wrappers as .cmd scripts (e.g. claude.cmd).
       // Without shell:true, spawn cannot resolve them via PATHEXT and the
       // healthcheck fails even when the CLI is correctly installed (#447).
-      ...(isWindows() ? { shell: true } : {}),
+      ...(useShell ? { shell: true } : {}),
     });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -410,7 +435,10 @@ const getKnownToolPaths = (toolId: string): string[] => {
     cline: [["cline.cmd", "cline"]],
     kilo: [["kilocode.cmd", "kilocode"]],
     opencode: [["opencode.cmd", "opencode"]],
-    qoder: [["qodercli.exe", "qodercli"]],
+    qoder: [
+      ["qodercli.cmd", "qodercli"],
+      ["qodercli.exe", "qodercli"],
+    ],
   };
 
   const bins = toolBins[toolId] || [];
@@ -495,11 +523,19 @@ const getNvmNodePath = (): string | null => {
 const getLookupEnv = () => {
   const env = { ...process.env };
   const extraPaths = getExtraPaths();
+  const currentPath = env.PATH || env.Path || "";
 
   // Only add user-specified extra paths, NOT generic user directories
   // This is more secure - user explicitly opts in via CLI_EXTRA_PATHS
   if (extraPaths.length > 0) {
-    env.PATH = [...extraPaths, env.PATH || ""].filter(Boolean).join(path.delimiter);
+    const mergedPath = [...extraPaths, currentPath].filter(Boolean).join(path.delimiter);
+    env.PATH = mergedPath;
+    if (isWindows()) {
+      env.Path = mergedPath;
+    }
+  } else if (isWindows() && currentPath) {
+    env.PATH = currentPath;
+    env.Path = currentPath;
   }
   return env;
 };
@@ -545,7 +581,11 @@ const locateCommand = async (command: string, env: Record<string, string | undef
   }
 
   if (isWindows()) {
-    const located = await runProcess("where", [command], { env, timeoutMs: 3000 });
+    const located = await runProcess("where.exe", [command], {
+      env,
+      timeoutMs: 3000,
+      useShell: false,
+    });
     if (located.ok && located.stdout) {
       // `where` may return multiple matches (e.g. `opencode` + `opencode.cmd`).
       // npm global installs on Windows create both a Unix shell script (no extension)
@@ -677,6 +717,19 @@ const locateCommandCandidate = async (
           reason: null,
         };
       }
+
+      if (result.installed && result.reason === "not_executable") {
+        return {
+          command: commands[0],
+          installed: true,
+          commandPath: result.commandPath,
+          reason: "not_executable",
+        };
+      }
+
+      if (result.reason && result.reason !== "not_found") {
+        return { command: commands[0], ...result };
+      }
     }
   }
 
@@ -698,7 +751,7 @@ const checkRunnable = async (
 ) => {
   // Minimal environment to prevent credential leakage to potentially malicious binaries
   const minimalEnv: Record<string, string | undefined> = {
-    PATH: env.PATH,
+    PATH: env.PATH || env.Path,
     HOME: env.HOME || env.USERPROFILE,
     USERPROFILE: env.USERPROFILE, // Windows needs this for os.homedir()
     APPDATA: env.APPDATA, // Many npm CLI tools rely on APPDATA
@@ -709,6 +762,10 @@ const checkRunnable = async (
     ComSpec: env.ComSpec, // Windows shell
     PATHEXT: env.PATHEXT, // Windows cmd.exe needs this to resolve .cmd/.bat/.exe extensions
   };
+
+  if (isWindows() && minimalEnv.PATH) {
+    minimalEnv.Path = minimalEnv.PATH;
+  }
 
   for (const args of [["--version"], ["-v"]]) {
     const result = await runProcess(commandPath, args, { env: minimalEnv, timeoutMs });
@@ -786,10 +843,23 @@ export const getCliConfigPaths = (toolId: string) => {
 
   const home = getCliConfigHome();
   return Object.fromEntries(
-    Object.entries(tool.paths).map(([key, relativePath]) => [
-      key,
-      path.join(home, relativePath as string),
-    ])
+    Object.entries(tool.paths).map(([key, relativePath]) => {
+      let resolvedPath = "";
+      if (Array.isArray(relativePath)) {
+        // Find the first path that exists, or default to the first one
+        resolvedPath = path.join(home, relativePath[0]);
+        for (const p of relativePath) {
+          const candidate = path.join(home, p);
+          if (fsSync.existsSync(candidate)) {
+            resolvedPath = candidate;
+            break;
+          }
+        }
+      } else {
+        resolvedPath = path.join(home, relativePath as string);
+      }
+      return [key, resolvedPath];
+    })
   );
 };
 

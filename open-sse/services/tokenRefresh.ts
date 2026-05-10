@@ -1,4 +1,6 @@
+// @ts-nocheck
 import { PROVIDERS, OAUTH_ENDPOINTS } from "../config/constants.ts";
+import { getGitHubCopilotRefreshHeaders } from "../config/providerHeaderProfiles.ts";
 import { pbkdf2Sync } from "node:crypto";
 import { runWithProxyContext } from "../utils/proxyFetch.ts";
 
@@ -10,6 +12,28 @@ const CACHE_SECRET = "omniroute-token-cache";
 // In-flight refresh promise cache to prevent race conditions
 // Key: "provider:sha256(refreshToken)" → Value: Promise<result>
 const refreshPromiseCache = new Map();
+
+// Per-connection mutex: prevents parallel OAuth refresh for rotating tokens.
+// Key: connectionId → Value: { promise, waiters }
+// Primary dedup when credentials.connectionId is present; refreshPromiseCache is fallback.
+const connectionRefreshMutex = new Map();
+
+type RefreshLogger = {
+  info?: (tag: string, message: string, data?: Record<string, unknown>) => void;
+  warn?: (tag: string, message: string, data?: Record<string, unknown>) => void;
+  error?: (tag: string, message: string, data?: Record<string, unknown>) => void;
+  debug?: (tag: string, message: string, data?: Record<string, unknown>) => void;
+} | null;
+
+function buildFormParams(entries: Record<string, unknown>): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(entries)) {
+    if (typeof value === "string" && value.length > 0) {
+      params.set(key, value);
+    }
+  }
+  return params;
+}
 
 function getRefreshCacheKey(provider, refreshToken) {
   const tokenHash = pbkdf2Sync(refreshToken, CACHE_SECRET, 1000, 32, "sha256").toString("hex");
@@ -24,7 +48,7 @@ export async function refreshAccessToken(
   refreshToken,
   credentials,
   log,
-  proxyConfig = null
+  proxyConfig: unknown = null
 ) {
   const config = PROVIDERS[provider];
 
@@ -92,7 +116,7 @@ export async function refreshAccessToken(
  * Specialized refresh for Cline OAuth tokens.
  * Cline refresh endpoint expects JSON body and returns camelCase fields.
  */
-export async function refreshClineToken(refreshToken, log, proxyConfig = null) {
+export async function refreshClineToken(refreshToken, log, proxyConfig: unknown = null) {
   const endpoint = PROVIDERS.cline?.refreshUrl;
   if (!endpoint) {
     log?.warn?.("TOKEN_REFRESH", "No refresh URL configured for Cline");
@@ -152,7 +176,7 @@ export async function refreshClineToken(refreshToken, log, proxyConfig = null) {
  * Specialized refresh for Kimi Coding OAuth tokens.
  * Uses custom X-Msh-* headers required by Kimi OAuth API.
  */
-export async function refreshKimiCodingToken(refreshToken, log, proxyConfig = null) {
+export async function refreshKimiCodingToken(refreshToken, log, proxyConfig: unknown = null) {
   const endpoint = PROVIDERS["kimi-coding"]?.refreshUrl || PROVIDERS["kimi-coding"]?.tokenUrl;
   if (!endpoint) {
     log?.warn?.("TOKEN_REFRESH", "No refresh URL configured for Kimi Coding");
@@ -220,10 +244,10 @@ export async function refreshKimiCodingToken(refreshToken, log, proxyConfig = nu
 /**
  * Specialized refresh for Claude OAuth tokens
  */
-export async function refreshClaudeOAuthToken(refreshToken, log, proxyConfig = null) {
+export async function refreshClaudeOAuthToken(refreshToken, log, proxyConfig: unknown = null) {
   try {
     // Standard OAuth2 token refresh uses form-urlencoded (not JSON)
-    const params = new URLSearchParams({
+    const params = buildFormParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
       client_id: PROVIDERS.claude.clientId,
@@ -277,7 +301,7 @@ export async function refreshGoogleToken(
   clientId,
   clientSecret,
   log,
-  proxyConfig = null
+  proxyConfig: unknown = null
 ) {
   const response = await runWithProxyContext(proxyConfig, () =>
     fetch(OAUTH_ENDPOINTS.google.token, {
@@ -286,7 +310,7 @@ export async function refreshGoogleToken(
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },
-      body: new URLSearchParams({
+      body: buildFormParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
         client_id: clientId,
@@ -319,10 +343,7 @@ export async function refreshGoogleToken(
   };
 }
 
-/**
- * Specialized refresh for Qwen OAuth tokens
- */
-export async function refreshQwenToken(refreshToken, log, proxyConfig = null) {
+export async function refreshQwenToken(refreshToken, log, proxyConfig: unknown = null) {
   const endpoint = OAUTH_ENDPOINTS.qwen.token;
 
   try {
@@ -333,7 +354,7 @@ export async function refreshQwenToken(refreshToken, log, proxyConfig = null) {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
         },
-        body: new URLSearchParams({
+        body: buildFormParams({
           grant_type: "refresh_token",
           refresh_token: refreshToken,
           client_id: PROVIDERS.qwen.clientId,
@@ -399,10 +420,10 @@ export async function refreshQwenToken(refreshToken, log, proxyConfig = null) {
 /**
  * Specialized refresh for Codex (OpenAI) OAuth tokens.
  * OpenAI uses rotating (one-time-use) refresh tokens.
- * Returns { error: 'refresh_token_reused' } when the token has already been consumed,
- * so callers can stop retrying and request re-authentication.
+ * Returns { error: 'unrecoverable_refresh_error', code } when the token has already been
+ * consumed or is invalid, so callers can stop retrying and request re-authentication.
  */
-export async function refreshCodexToken(refreshToken, log, proxyConfig = null) {
+export async function refreshCodexToken(refreshToken, log, proxyConfig: unknown = null) {
   try {
     const response = await runWithProxyContext(proxyConfig, () =>
       fetch(OAUTH_ENDPOINTS.openai.token, {
@@ -411,7 +432,7 @@ export async function refreshCodexToken(refreshToken, log, proxyConfig = null) {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
         },
-        body: new URLSearchParams({
+        body: buildFormParams({
           grant_type: "refresh_token",
           refresh_token: refreshToken,
           client_id: PROVIDERS.codex.clientId,
@@ -423,26 +444,33 @@ export async function refreshCodexToken(refreshToken, log, proxyConfig = null) {
     if (!response.ok) {
       const errorText = await response.text();
 
-      // Detect unrecoverable "refresh_token_reused" error from OpenAI
-      // This means the token was already consumed and a new one was issued.
+      // Detect unrecoverable "refresh_token_reused" or "invalid_grant" error from OpenAI
+      // This means the token was already consumed or has expired.
       // Retrying with the same token will never succeed.
       let errorCode = null;
       try {
         const parsed = JSON.parse(errorText);
-        errorCode = parsed?.error?.code;
+        errorCode =
+          parsed?.error?.code || (typeof parsed?.error === "string" ? parsed.error : null);
       } catch {
         // not JSON, ignore
       }
 
-      if (errorCode === "refresh_token_reused") {
+      if (
+        errorCode === "refresh_token_reused" ||
+        errorCode === "invalid_grant" ||
+        errorCode === "token_expired" ||
+        errorCode === "invalid_token"
+      ) {
         log?.error?.(
           "TOKEN_REFRESH",
-          "Codex refresh token already used (rotating token consumed). Re-authentication required.",
+          "Codex refresh token already used or invalid. Re-authentication required.",
           {
             status: response.status,
+            errorCode,
           }
         );
-        return { error: "refresh_token_reused" };
+        return { error: "unrecoverable_refresh_error", code: errorCode };
       }
 
       log?.error?.("TOKEN_REFRESH", "Failed to refresh Codex token", {
@@ -479,7 +507,7 @@ export async function refreshKiroToken(
   refreshToken,
   providerSpecificData,
   log,
-  proxyConfig = null
+  proxyConfig: unknown = null
 ) {
   try {
     const authMethod = providerSpecificData?.authMethod;
@@ -490,11 +518,7 @@ export async function refreshKiroToken(
     // AWS SSO OIDC (Builder ID or IDC)
     // If clientId and clientSecret exist, assume AWS SSO OIDC (default to builder-id if authMethod not specified)
     if (clientId && clientSecret) {
-      const isIDC = authMethod === "idc";
-      const endpoint =
-        isIDC && region
-          ? `https://oidc.${region}.amazonaws.com/token`
-          : "https://oidc.us-east-1.amazonaws.com/token";
+      const endpoint = `https://oidc.${region || "us-east-1"}.amazonaws.com/token`;
 
       const response = await runWithProxyContext(proxyConfig, () =>
         fetch(endpoint, {
@@ -536,8 +560,13 @@ export async function refreshKiroToken(
     }
 
     // Social Auth (Google/GitHub) - use Kiro's refresh endpoint
+    const tokenUrl = PROVIDERS.kiro.tokenUrl;
+    if (!tokenUrl) {
+      log?.error?.("TOKEN_REFRESH", "Missing Kiro token endpoint");
+      return null;
+    }
     const response = await runWithProxyContext(proxyConfig, () =>
-      fetch(PROVIDERS.kiro.tokenUrl, {
+      fetch(tokenUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -579,7 +608,7 @@ export async function refreshKiroToken(
 /**
  * Specialized refresh for Qoder OAuth tokens
  */
-export async function refreshIflowToken(refreshToken, log, proxyConfig = null) {
+export async function refreshQoderToken(refreshToken, log, proxyConfig: unknown = null) {
   if (!OAUTH_ENDPOINTS.qoder.token || !PROVIDERS.qoder.clientId || !PROVIDERS.qoder.clientSecret) {
     log?.warn?.(
       "TOKEN_REFRESH",
@@ -598,7 +627,7 @@ export async function refreshIflowToken(refreshToken, log, proxyConfig = null) {
         Accept: "application/json",
         Authorization: `Basic ${basicAuth}`,
       },
-      body: new URLSearchParams({
+      body: buildFormParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
         client_id: PROVIDERS.qoder.clientId,
@@ -634,7 +663,7 @@ export async function refreshIflowToken(refreshToken, log, proxyConfig = null) {
 /**
  * Specialized refresh for GitHub Copilot OAuth tokens
  */
-export async function refreshGitHubToken(refreshToken, log, proxyConfig = null) {
+export async function refreshGitHubToken(refreshToken, log, proxyConfig: unknown = null) {
   const response = await runWithProxyContext(proxyConfig, () =>
     fetch(OAUTH_ENDPOINTS.github.token, {
       method: "POST",
@@ -642,7 +671,7 @@ export async function refreshGitHubToken(refreshToken, log, proxyConfig = null) 
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },
-      body: new URLSearchParams({
+      body: buildFormParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
         client_id: PROVIDERS.github.clientId,
@@ -678,17 +707,11 @@ export async function refreshGitHubToken(refreshToken, log, proxyConfig = null) 
 /**
  * Refresh GitHub Copilot token using GitHub access token
  */
-export async function refreshCopilotToken(githubAccessToken, log, proxyConfig = null) {
+export async function refreshCopilotToken(githubAccessToken, log, proxyConfig: unknown = null) {
   try {
     const response = await runWithProxyContext(proxyConfig, () =>
       fetch("https://api.github.com/copilot_internal/v2/token", {
-        headers: {
-          Authorization: `token ${githubAccessToken}`,
-          "User-Agent": "GithubCopilot/1.0",
-          "Editor-Version": "vscode/1.100.0",
-          "Editor-Plugin-Version": "copilot/1.300.0",
-          Accept: "application/json",
-        },
+        headers: getGitHubCopilotRefreshHeaders(`token ${githubAccessToken}`),
       })
     );
 
@@ -723,7 +746,7 @@ export async function refreshCopilotToken(githubAccessToken, log, proxyConfig = 
 /**
  * Get access token for a specific provider (internal, does the actual work)
  */
-async function _getAccessTokenInternal(provider, credentials, log, proxyConfig = null) {
+async function _getAccessTokenInternal(provider, credentials, log, proxyConfig: unknown = null) {
   switch (provider) {
     case "gemini":
     case "gemini-cli":
@@ -746,12 +769,13 @@ async function _getAccessTokenInternal(provider, credentials, log, proxyConfig =
       return await refreshQwenToken(credentials.refreshToken, log, proxyConfig);
 
     case "qoder":
-      return await refreshIflowToken(credentials.refreshToken, log, proxyConfig);
+      return await refreshQoderToken(credentials.refreshToken, log, proxyConfig);
 
     case "github":
       return await refreshGitHubToken(credentials.refreshToken, log, proxyConfig);
 
     case "kiro":
+    case "amazon-q":
       return await refreshKiroToken(
         credentials.refreshToken,
         credentials.providerSpecificData,
@@ -785,6 +809,7 @@ export function supportsTokenRefresh(provider) {
     "qoder",
     "github",
     "kiro",
+    "amazon-q",
     "cline",
     "kimi-coding",
   ]);
@@ -802,31 +827,70 @@ export function isUnrecoverableRefreshError(result) {
   return (
     result &&
     typeof result === "object" &&
-    (result.error === "refresh_token_reused" || result.error === "invalid_request")
+    (result.error === "unrecoverable_refresh_error" ||
+      result.error === "refresh_token_reused" ||
+      result.error === "invalid_request" ||
+      result.error === "invalid_grant")
   );
 }
 
 /**
  * Get access token for a specific provider (with deduplication).
- * If a refresh is already in-flight for the same provider+token,
- * subsequent calls share the existing promise instead of making
- * parallel OAuth requests.
+ *
+ * Deduplication strategy (two layers):
+ * 1. Per-connection mutex (primary): if credentials.connectionId is present, all concurrent
+ *    callers for that connection share one in-flight promise regardless of which token they
+ *    loaded. This prevents refresh_token_reused errors with rotating (one-time-use) tokens,
+ *    e.g. Codex/OpenAI, where callers that loaded credentials at different times may hold
+ *    different token strings but refer to the same connection.
+ * 2. Token-hash fallback: if no connectionId, dedup by provider+sha256(refreshToken) as before.
+ *
+ * Additionally, when connectionId is present, the stale-token check reads the DB to detect
+ * whether another process already refreshed the token. If the DB token is still valid it is
+ * returned immediately without a new upstream call.
  */
-export async function getAccessToken(provider, credentials, log, proxyConfig = null) {
+export async function getAccessToken(provider, credentials, log, proxyConfig: unknown = null) {
   if (!credentials || !credentials.refreshToken || typeof credentials.refreshToken !== "string") {
     log?.warn?.("TOKEN_REFRESH", `No valid refresh token available for provider: ${provider}`);
     return null;
   }
 
+  const connectionId = credentials.connectionId;
+
+  // ── Layer 1: per-connection mutex ──────────────────────────────────────────
+  if (connectionId && typeof connectionId === "string") {
+    const existing = connectionRefreshMutex.get(connectionId);
+    if (existing) {
+      existing.waiters++;
+      log?.info?.("TOKEN_REFRESH", "Concurrent refresh detected — sharing in-flight refresh", {
+        provider,
+        connectionId,
+        waiters: existing.waiters,
+      });
+      return existing.promise;
+    }
+
+    const entry = { promise: null, waiters: 0 };
+    entry.promise = _getAccessTokenWithStalenessCheck(
+      provider,
+      credentials,
+      log,
+      proxyConfig
+    ).finally(() => {
+      connectionRefreshMutex.delete(connectionId);
+    });
+    connectionRefreshMutex.set(connectionId, entry);
+    return entry.promise;
+  }
+
+  // ── Layer 2: token-hash fallback (no connectionId) ─────────────────────────
   const cacheKey = getRefreshCacheKey(provider, credentials.refreshToken);
 
-  // If a refresh is already in-flight, reuse it
   if (refreshPromiseCache.has(cacheKey)) {
     log?.info?.("TOKEN_REFRESH", `Reusing in-flight refresh for ${provider}`);
     return refreshPromiseCache.get(cacheKey);
   }
 
-  // Start a new refresh and cache the promise
   const refreshPromise = _getAccessTokenInternal(provider, credentials, log, proxyConfig).finally(
     () => {
       refreshPromiseCache.delete(cacheKey);
@@ -835,6 +899,59 @@ export async function getAccessToken(provider, credentials, log, proxyConfig = n
 
   refreshPromiseCache.set(cacheKey, refreshPromise);
   return refreshPromise;
+}
+
+/**
+ * Internal helper: performs the DB staleness check then calls the actual refresh.
+ * Only called from the per-connection mutex path (Layer 1 above).
+ */
+async function _getAccessTokenWithStalenessCheck(provider, credentials, log, proxyConfig) {
+  // RACE CONDITION PREVENTION:
+  // If the credentials object in memory is stale (e.g. it waited in a semaphore while another
+  // request refreshed the token), using its OLD refreshToken will cause the provider (e.g. OpenAI)
+  // to reject it with 'refresh_token_reused' and revoke the new token family.
+  // We MUST check if the DB has a newer token before proceeding with a network refresh.
+  if (credentials.connectionId) {
+    try {
+      const { getProviderConnectionById } = await import("../../src/lib/db/providers");
+      const dbConnection = await getProviderConnectionById(credentials.connectionId);
+      if (
+        dbConnection &&
+        dbConnection.refreshToken &&
+        dbConnection.refreshToken !== credentials.refreshToken
+      ) {
+        log?.info?.(
+          "TOKEN_REFRESH",
+          `Stale token detected in memory for ${provider}. Using refreshed token from DB.`
+        );
+
+        // If the DB token is not expired, we can just return it!
+        const now = Date.now();
+        const dbExpiresAt = dbConnection.expiresAt ? new Date(dbConnection.expiresAt).getTime() : 0;
+
+        if (dbExpiresAt > now + 60000) {
+          // 60 seconds buffer
+          log?.info?.("TOKEN_REFRESH", `DB token is still valid. Skipping OAuth refresh.`);
+          return {
+            accessToken: dbConnection.accessToken,
+            refreshToken: dbConnection.refreshToken,
+            expiresIn: dbConnection.expiresIn,
+          };
+        } else {
+          // DB token is also expired, but it's the NEWEST one. We must use it to refresh.
+          credentials.refreshToken = dbConnection.refreshToken;
+          credentials.accessToken = dbConnection.accessToken;
+        }
+      }
+    } catch (e) {
+      log?.warn?.(
+        "TOKEN_REFRESH",
+        `Failed to check DB for stale token: ${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+  }
+
+  return _getAccessTokenInternal(provider, credentials, log, proxyConfig);
 }
 
 /**
@@ -969,6 +1086,18 @@ export function isProviderBlocked(provider: string): boolean {
 }
 
 /**
+ * Get active per-connection mutex entries (for diagnostics/metrics).
+ * Returns a snapshot of connections that have an in-flight refresh and their waiter count.
+ */
+export function getConnectionRefreshMutexStatus(): Record<string, { waiters: number }> {
+  const result: Record<string, { waiters: number }> = {};
+  for (const [connectionId, entry] of connectionRefreshMutex.entries()) {
+    result[connectionId] = { waiters: entry.waiters };
+  }
+  return result;
+}
+
+/**
  * Get circuit breaker status for all providers (for diagnostics).
  */
 export function getCircuitBreakerStatus(): Record<string, CircuitBreakerStatusEntry> {
@@ -1039,7 +1168,7 @@ async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<
 export async function refreshWithRetry(
   refreshFn,
   maxRetries = 3,
-  log = null,
+  log: RefreshLogger = null,
   provider = "unknown"
 ) {
   // Circuit breaker check

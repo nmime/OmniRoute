@@ -1,8 +1,40 @@
 // Claude helper functions for translator
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 
+type ClaudeContentBlock = {
+  type?: string;
+  text?: string;
+  name?: string;
+  tool_use_id?: string;
+  cache_control?: unknown;
+  signature?: string;
+  thinking?: string;
+  [key: string]: unknown;
+};
+
+type ClaudeMessage = {
+  role?: string;
+  content?: string | ClaudeContentBlock[];
+  [key: string]: unknown;
+};
+
+type ClaudeTool = {
+  name?: string;
+  defer_loading?: boolean;
+  cache_control?: unknown;
+  [key: string]: unknown;
+};
+
+type ClaudeRequestBody = {
+  system?: Array<Record<string, unknown> & { cache_control?: unknown }>;
+  messages?: ClaudeMessage[];
+  tools?: ClaudeTool[];
+  thinking?: Record<string, unknown> | null;
+  [key: string]: unknown;
+};
+
 // Check if message has valid non-empty content
-export function hasValidContent(msg) {
+export function hasValidContent(msg: ClaudeMessage): boolean {
   if (typeof msg.content === "string" && msg.content.trim()) return true;
   if (Array.isArray(msg.content)) {
     return msg.content.some(
@@ -18,7 +50,7 @@ export function hasValidContent(msg) {
 // Fix tool_use/tool_result ordering for Claude API
 // 1. Assistant message with tool_use: remove text AFTER tool_use (Claude doesn't allow)
 // 2. Merge consecutive same-role messages
-export function fixToolUseOrdering(messages) {
+export function fixToolUseOrdering(messages: ClaudeMessage[]): ClaudeMessage[] {
   if (messages.length <= 1) return messages;
 
   // Pass 1: Fix assistant messages with tool_use - remove text after tool_use
@@ -27,7 +59,7 @@ export function fixToolUseOrdering(messages) {
       const hasToolUse = msg.content.some((b) => b.type === "tool_use");
       if (hasToolUse) {
         // Keep only: thinking blocks + tool_use blocks (remove text blocks after tool_use)
-        const newContent = [];
+        const newContent: ClaudeContentBlock[] = [];
         let foundToolUse = false;
 
         for (const block of msg.content) {
@@ -49,7 +81,7 @@ export function fixToolUseOrdering(messages) {
   }
 
   // Pass 2: Merge consecutive same-role messages
-  const merged = [];
+  const merged: ClaudeMessage[] = [];
 
   for (const msg of messages) {
     const last = merged[merged.length - 1];
@@ -86,7 +118,7 @@ export function fixToolUseOrdering(messages) {
   return merged;
 }
 
-function ensureMessageContentArray(msg) {
+function ensureMessageContentArray(msg: ClaudeMessage): ClaudeContentBlock[] {
   if (Array.isArray(msg?.content)) return msg.content;
   if (typeof msg?.content === "string" && msg.content.trim()) {
     msg.content = [{ type: "text", text: msg.content }];
@@ -95,7 +127,7 @@ function ensureMessageContentArray(msg) {
   return [];
 }
 
-function markMessageCacheControl(msg, ttl) {
+function markMessageCacheControl(msg: ClaudeMessage, ttl?: string): boolean {
   const content = ensureMessageContentArray(msg);
   if (content.length === 0) return false;
   const lastIndex = content.length - 1;
@@ -109,13 +141,21 @@ function markMessageCacheControl(msg, ttl) {
 // - Filter empty messages
 // - Add thinking block for Anthropic endpoint (provider === "claude")
 // - Fix tool_use/tool_result ordering
-export function prepareClaudeRequest(body, provider = null, preserveCacheControl = false) {
+export function prepareClaudeRequest(
+  body: ClaudeRequestBody,
+  provider: string | null = null,
+  preserveCacheControl = false
+): ClaudeRequestBody {
   // 1. System: remove all cache_control, add only to last block with ttl 1h
   // In passthrough mode, preserve existing cache_control markers
-  if (body.system && Array.isArray(body.system) && !preserveCacheControl) {
-    body.system = body.system.map((block, i) => {
+  const supportsPromptCaching =
+    provider === "claude" || provider?.startsWith?.("anthropic-compatible-");
+
+  const systemBlocks = body.system;
+  if (systemBlocks && Array.isArray(systemBlocks) && !preserveCacheControl) {
+    body.system = systemBlocks.map((block, i) => {
       const { cache_control, ...rest } = block;
-      if (i === body.system.length - 1) {
+      if (i === systemBlocks.length - 1 && supportsPromptCaching) {
         return { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } };
       }
       return rest;
@@ -125,7 +165,7 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
   // 2. Messages: process in optimized passes
   if (body.messages && Array.isArray(body.messages)) {
     const len = body.messages.length;
-    let filtered = [];
+    let filtered: ClaudeMessage[] = [];
 
     // Pass 1: remove cache_control + filter empty messages
     // In passthrough mode, preserve existing cache_control markers
@@ -180,8 +220,8 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
     // - cache the second-to-last user turn for conversation reuse
     // - cache the last assistant turn so the next user turn can reuse it
     // Skip in passthrough mode to preserve client's cache_control markers
-    if (!preserveCacheControl) {
-      const userMessageIndexes = filtered.reduce((indexes, msg, index) => {
+    if (!preserveCacheControl && supportsPromptCaching) {
+      const userMessageIndexes = filtered.reduce<number[]>((indexes, msg, index) => {
         if (msg?.role === "user") indexes.push(index);
         return indexes;
       }, []);
@@ -196,11 +236,17 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
     let lastAssistantProcessed = false;
     for (let i = filtered.length - 1; i >= 0; i--) {
       const msg = filtered[i];
+      const content = ensureMessageContentArray(msg);
 
-      if (msg.role === "assistant" && Array.isArray(ensureMessageContentArray(msg))) {
+      if (msg.role === "assistant" && content.length > 0) {
         // Add cache_control to last block of first (from end) assistant with content
         // Skip in passthrough mode to preserve client's cache_control markers
-        if (!preserveCacheControl && !lastAssistantProcessed && markMessageCacheControl(msg)) {
+        if (
+          !preserveCacheControl &&
+          supportsPromptCaching &&
+          !lastAssistantProcessed &&
+          markMessageCacheControl(msg)
+        ) {
           lastAssistantProcessed = true;
         }
 
@@ -209,10 +255,16 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
           let hasToolUse = false;
           let hasThinking = false;
 
-          // Always replace signature for all thinking blocks
-          for (const block of msg.content) {
+          // Convert thinking blocks to redacted_thinking and replace signature.
+          // When requests cross provider boundaries (e.g., combo fallback), the
+          // original thinking signature is invalid for the new provider, causing
+          // "Invalid signature in thinking block" 400 errors. redacted_thinking
+          // blocks are accepted without signature validation.
+          for (const block of content) {
             if (block.type === "thinking" || block.type === "redacted_thinking") {
+              block.type = "redacted_thinking";
               block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
+              delete block.thinking;
               hasThinking = true;
             }
             if (block.type === "tool_use") hasToolUse = true;
@@ -220,7 +272,7 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
 
           // Add thinking block if thinking enabled + has tool_use but no thinking
           if (thinkingEnabled && !hasThinking && hasToolUse) {
-            msg.content.unshift({
+            content.unshift({
               type: "thinking",
               thinking: ".",
               signature: DEFAULT_THINKING_CLAUDE_SIGNATURE,
@@ -239,10 +291,12 @@ export function prepareClaudeRequest(body, provider = null, preserveCacheControl
       const { cache_control, ...rest } = tool;
       return rest;
     });
-    for (let i = body.tools.length - 1; i >= 0; i--) {
-      if (!body.tools[i].defer_loading) {
-        body.tools[i].cache_control = { type: "ephemeral", ttl: "1h" };
-        break;
+    if (supportsPromptCaching) {
+      for (let i = body.tools.length - 1; i >= 0; i--) {
+        if (!body.tools[i].defer_loading) {
+          body.tools[i].cache_control = { type: "ephemeral", ttl: "1h" };
+          break;
+        }
       }
     }
   }

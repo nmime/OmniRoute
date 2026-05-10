@@ -26,7 +26,7 @@ function futureIso(ms = 60_000) {
   return new Date(Date.now() + ms).toISOString();
 }
 
-async function seedConnection(provider, overrides = {}) {
+async function seedConnection(provider: string, overrides: any = {}) {
   return providersDb.createProviderConnection({
     provider,
     authType: overrides.authType || "apikey",
@@ -167,14 +167,14 @@ test("getProviderCredentialsWithQuotaPreflight skips exhausted preflight account
 
   const quotaPreflight = await import("../../open-sse/services/quotaPreflight.ts");
   quotaPreflight.registerQuotaFetcher("openai", async (connectionId) => ({
-    used: connectionId === blocked.id ? 96 : 40,
+    used: connectionId === blocked.id ? 100 : 40,
     total: 100,
-    percentUsed: connectionId === blocked.id ? 0.96 : 0.4,
+    percentUsed: connectionId === blocked.id ? 1.0 : 0.4,
   }));
 
   const selected = await auth.getProviderCredentialsWithQuotaPreflight("openai");
 
-  assert.equal(selected.connectionId, healthy.id);
+  assert.equal((selected as any).connectionId, healthy.id);
 });
 
 test("getProviderCredentialsWithQuotaPreflight returns allRateLimited when a forced connection is blocked by preflight", async () => {
@@ -188,19 +188,75 @@ test("getProviderCredentialsWithQuotaPreflight returns allRateLimited when a for
 
   const quotaPreflight = await import("../../open-sse/services/quotaPreflight.ts");
   quotaPreflight.registerQuotaFetcher("openai", async (connectionId) => ({
-    used: connectionId === blocked.id ? 99 : 20,
+    used: connectionId === blocked.id ? 100 : 20,
     total: 100,
-    percentUsed: connectionId === blocked.id ? 0.99 : 0.2,
+    percentUsed: connectionId === blocked.id ? 1.0 : 0.2,
     resetAt: futureIso(120_000),
   }));
 
   const selected = await auth.getProviderCredentialsWithQuotaPreflight("openai", null, null, null, {
-    forcedConnectionId: blocked.id,
+    forcedConnectionId: (blocked as any).id,
   });
 
   assert.equal(selected.allRateLimited, true);
   assert.equal(selected.lastErrorCode, 429);
   assert.match(selected.lastError, /quota preflight/i);
+});
+
+test("getProviderCredentials keeps separate codex affinity per session", async () => {
+  await settingsDb.updateSettings({ fallbackStrategy: "round-robin", stickyRoundRobinLimit: 10 });
+  const first = await seedConnection("codex", {
+    name: "codex-affinity-a",
+    lastUsedAt: new Date(Date.now() - 20_000).toISOString(),
+  });
+  const second = await seedConnection("codex", {
+    name: "codex-affinity-b",
+    lastUsedAt: new Date(Date.now() - 10_000).toISOString(),
+  });
+
+  const sessionA1 = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-a",
+  });
+  const sessionB1 = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-b",
+  });
+  const sessionA2 = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-a",
+  });
+  const sessionB2 = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-b",
+  });
+
+  assert.equal(sessionA1.connectionId, first.id);
+  assert.equal(sessionB1.connectionId, second.id);
+  assert.equal(sessionA2.connectionId, first.id);
+  assert.equal(sessionB2.connectionId, second.id);
+});
+
+test("getProviderCredentials rebinds codex session when affinity connection is excluded", async () => {
+  await settingsDb.updateSettings({ fallbackStrategy: "round-robin", stickyRoundRobinLimit: 10 });
+  const first = await seedConnection("codex", {
+    name: "codex-affinity-excluded-a",
+    lastUsedAt: new Date(Date.now() - 20_000).toISOString(),
+  });
+  const second = await seedConnection("codex", {
+    name: "codex-affinity-excluded-b",
+    lastUsedAt: new Date(Date.now() - 10_000).toISOString(),
+  });
+
+  const initial = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-excluded",
+  });
+  const rebound = await auth.getProviderCredentials("codex", first.id, null, "gpt-5.5", {
+    sessionKey: "session-excluded",
+  });
+  const sticky = await auth.getProviderCredentials("codex", null, null, "gpt-5.5", {
+    sessionKey: "session-excluded",
+  });
+
+  assert.equal(initial.connectionId, first.id);
+  assert.equal(rebound.connectionId, second.id);
+  assert.equal(sticky.connectionId, second.id);
 });
 
 test("resolveQuotaLimitPolicy normalizes Codex windows, thresholds, and defaults", () => {
@@ -259,7 +315,7 @@ test("evaluateQuotaLimitPolicy aggregates reasons and keeps the earliest valid f
     daily: { remainingPercentage: 90, resetAt: futureIso(180_000) },
   });
 
-  const evaluation = auth.evaluateQuotaLimitPolicy("openai", connection);
+  const evaluation = auth.evaluateQuotaLimitPolicy("openai", connection as any);
 
   assert.equal(evaluation.blocked, true);
   assert.deepEqual(evaluation.reasons, ["weekly usage 80%", "session usage 95%"]);
@@ -318,7 +374,7 @@ test("getProviderCredentials honors allowedConnections filters", async () => {
     apiKey: "sk-selected",
   });
 
-  const selected = await auth.getProviderCredentials("openai", null, [selectedConn.id]);
+  const selected = await auth.getProviderCredentials("openai", null, [(selectedConn as any).id]);
 
   assert.equal(selected.connectionId, selectedConn.id);
   assert.equal(selected.apiKey, "sk-selected");
@@ -338,7 +394,7 @@ test("getProviderCredentials honors forcedConnectionId even when another account
   });
 
   const selected = await auth.getProviderCredentials("openai", null, null, null, {
-    forcedConnectionId: forcedConn.id,
+    forcedConnectionId: (forcedConn as any).id,
   });
 
   assert.equal(selected.connectionId, forcedConn.id);
@@ -355,9 +411,15 @@ test("getProviderCredentials intersects forcedConnectionId with allowedConnectio
     apiKey: "sk-blocked",
   });
 
-  const selected = await auth.getProviderCredentials("openai", null, [allowedConn.id], null, {
-    forcedConnectionId: blockedConn.id,
-  });
+  const selected = await auth.getProviderCredentials(
+    "openai",
+    null,
+    [(allowedConn as any).id],
+    null,
+    {
+      forcedConnectionId: (blockedConn as any).id,
+    }
+  );
 
   assert.equal(selected, null);
 });
@@ -827,7 +889,7 @@ test("markAccountUnavailable honors configured api-key rate-limit cooldowns", as
   await settingsDb.updateSettings({
     providerProfiles: {
       apikey: {
-        transientCooldown: 200,
+        transientCooldown: 125,
         rateLimitCooldown: 125,
         maxBackoffLevel: 3,
         circuitBreakerThreshold: 60,

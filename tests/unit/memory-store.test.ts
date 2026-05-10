@@ -20,7 +20,7 @@ async function resetStorage() {
         fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
       }
       break;
-    } catch (error) {
+    } catch (error: any) {
       if ((error?.code === "EBUSY" || error?.code === "EPERM") && attempt < 9) {
         await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       } else {
@@ -177,18 +177,21 @@ test("listMemories filters by api key, type and session while preserving newest-
 test("listMemories supports limit and offset pagination even when only offset is provided", async () => {
   insertMemoryRow({
     id: "page-1",
+    key: "pagination:1",
     content: "oldest",
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "page-2",
+    key: "pagination:2",
     content: "middle",
     createdAt: "2026-04-02T00:00:00.000Z",
     updatedAt: "2026-04-02T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "page-3",
+    key: "pagination:3",
     content: "newest",
     createdAt: "2026-04-03T00:00:00.000Z",
     updatedAt: "2026-04-03T00:00:00.000Z",
@@ -248,29 +251,24 @@ test("listMemories applies query filtering before pagination and type stats", as
   assert.deepEqual(filtered.byType, { factual: 1, semantic: 1 });
 });
 
-// ---------------------------------------------------------------------------
-// Pagination via page parameter (page-based, complementing the offset tests above)
-// SKIPPED: These tests require insertMemoryRow() which triggers a pre-existing
-// SQLITE_MISMATCH error in the test environment (same issue that affects 7 of
-// the 9 original tests above). The pagination logic itself is covered by the
-// pure-function tests in tests/unit/pagination.test.ts.
-// ---------------------------------------------------------------------------
-
-test.skip("listMemories supports page-based pagination (page 1)", async () => {
+test("listMemories supports page-based pagination (page 1)", async () => {
   insertMemoryRow({
     id: "pg-1",
+    key: "page:test:1",
     content: "first",
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "pg-2",
+    key: "page:test:2",
     content: "second",
     createdAt: "2026-04-02T00:00:00.000Z",
     updatedAt: "2026-04-02T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "pg-3",
+    key: "page:test:3",
     content: "third",
     createdAt: "2026-04-03T00:00:00.000Z",
     updatedAt: "2026-04-03T00:00:00.000Z",
@@ -284,21 +282,24 @@ test.skip("listMemories supports page-based pagination (page 1)", async () => {
   assert.equal(page1.total, 3);
 });
 
-test.skip("listMemories supports page-based pagination (page 2 returns remainder)", async () => {
+test("listMemories supports page-based pagination (page 2 returns remainder)", async () => {
   insertMemoryRow({
     id: "pg-1",
+    key: "page:test:1",
     content: "first",
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "pg-2",
+    key: "page:test:2",
     content: "second",
     createdAt: "2026-04-02T00:00:00.000Z",
     updatedAt: "2026-04-02T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "pg-3",
+    key: "page:test:3",
     content: "third",
     createdAt: "2026-04-03T00:00:00.000Z",
     updatedAt: "2026-04-03T00:00:00.000Z",
@@ -312,9 +313,10 @@ test.skip("listMemories supports page-based pagination (page 2 returns remainder
   assert.equal(page2.total, 3);
 });
 
-test.skip("listMemories returns empty data for a page beyond the result set", async () => {
+test("listMemories returns empty data for a page beyond the result set", async () => {
   insertMemoryRow({
     id: "pg-1",
+    key: "page:test:1",
     content: "only entry",
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
@@ -325,15 +327,17 @@ test.skip("listMemories returns empty data for a page beyond the result set", as
   assert.equal(beyondPage.total, 1);
 });
 
-test.skip("listMemories page parameter defaults to page 1 when omitted with limit", async () => {
+test("listMemories page parameter defaults to page 1 when omitted with limit", async () => {
   insertMemoryRow({
     id: "pg-1",
+    key: "page:test:1",
     content: "first",
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
   });
   insertMemoryRow({
     id: "pg-2",
+    key: "page:test:2",
     content: "second",
     createdAt: "2026-04-02T00:00:00.000Z",
     updatedAt: "2026-04-02T00:00:00.000Z",

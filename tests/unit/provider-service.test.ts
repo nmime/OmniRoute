@@ -58,7 +58,7 @@ test("Anthropic-compatible Claude Code providers use the Claude Code URL and hea
 
   assert.equal(isClaudeCodeCompatible("anthropic-compatible-cc-demo"), true);
   assert.equal(url, "https://proxy.example.com/v1/messages?beta=true");
-  assert.equal(headers["x-api-key"], "anthropic-token");
+  assert.equal(headers["Authorization"], "Bearer anthropic-token");
   assert.equal(headers.Accept, "application/json");
   assert.equal(headers["X-Claude-Code-Session-Id"], "session-123");
   assert.equal(headers["anthropic-version"], "2023-06-01");
@@ -101,6 +101,19 @@ test("Registry-driven headers support x-goog-api-key and bearer fallback", () =>
   assert.equal(accessTokenHeaders.Authorization, "Bearer gemini-access-token");
 });
 
+test("Registry-driven headers support Key auth", () => {
+  const headers = buildProviderHeaders(
+    "maritalk",
+    {
+      apiKey: "maritalk-key",
+    },
+    true
+  );
+
+  assert.equal(headers.Authorization, "Key maritalk-key");
+  assert.equal(headers.Accept, "text/event-stream");
+});
+
 test("Unknown providers fall back to bearer auth and OpenAI format", () => {
   const headers = buildProviderHeaders(
     "custom-provider",
@@ -114,7 +127,7 @@ test("Unknown providers fall back to bearer auth and OpenAI format", () => {
   assert.equal(getTargetFormat("custom-provider"), "openai");
 });
 
-test("thinking config is removed when the last message is not from the user", () => {
+test("native thinking config is removed when the last message is not from the user", () => {
   const assistantLast = {
     messages: [
       { role: "user", content: "hi" },
@@ -134,7 +147,7 @@ test("thinking config is removed when the last message is not from the user", ()
   assert.equal(isLastMessageFromUser({ messages: [] }), true);
   assert.equal(isLastMessageFromUser(assistantLast), false);
   assert.equal(hasThinkingConfig(userLast), true);
-  assert.equal("reasoning_effort" in normalized, false);
+  assert.equal(normalized.reasoning_effort, "high");
   assert.equal("thinking" in normalized, false);
   assert.equal(normalizeThinkingConfig(userLast).reasoning_effort, "medium");
 });

@@ -1,9 +1,19 @@
-import test from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { AntigravityExecutor } from "../../open-sse/executors/antigravity.ts";
+import { setCliCompatProviders } from "../../open-sse/config/cliFingerprints.ts";
+import { scrubProxyAndFingerprintHeaders } from "../../open-sse/services/antigravityHeaderScrub.ts";
+import {
+  clearAntigravityVersionCache,
+  seedAntigravityVersionCache,
+} from "../../open-sse/services/antigravityVersion.ts";
 
-async function withEnv(name, value, fn) {
+async function withEnv<T>(
+  name: string,
+  value: string | undefined,
+  fn: () => T | Promise<T>
+): Promise<T> {
   const previous = process.env[name];
   if (value === undefined) {
     delete process.env[name];
@@ -22,6 +32,10 @@ async function withEnv(name, value, fn) {
   }
 }
 
+test.afterEach(() => {
+  clearAntigravityVersionCache();
+});
+
 test("AntigravityExecutor.buildUrl always targets the streaming endpoint", () => {
   const executor = new AntigravityExecutor();
   assert.match(
@@ -34,13 +48,29 @@ test("AntigravityExecutor.buildUrl always targets the streaming endpoint", () =>
   );
 });
 
-test("AntigravityExecutor.buildHeaders includes auth and SSE accept", () => {
+test("AntigravityExecutor.buildHeaders includes native headers without OmniRoute internals", () => {
   const executor = new AntigravityExecutor();
   const headers = executor.buildHeaders({ accessToken: "ag-token" }, false);
 
   assert.equal(headers.Authorization, "Bearer ag-token");
   assert.equal(headers.Accept, "text/event-stream");
-  assert.equal(headers["X-OmniRoute-Source"], "omniroute");
+  assert.match(headers["User-Agent"], /^Antigravity\/4\.1\.33 /);
+  assert.equal(headers["X-OmniRoute-Source"], undefined);
+});
+
+test("Antigravity header scrub removes OmniRoute internal headers", () => {
+  const headers = scrubProxyAndFingerprintHeaders({
+    Authorization: "Bearer ag-token",
+    "X-OmniRoute-Source": "omniroute",
+    "X-OmniRoute-No-Cache": "true",
+    "X-Forwarded-For": "127.0.0.1",
+  });
+
+  assert.equal(headers.Authorization, "Bearer ag-token");
+  assert.equal(headers["X-OmniRoute-Source"], undefined);
+  assert.equal(headers["X-OmniRoute-No-Cache"], undefined);
+  assert.equal(headers["X-Forwarded-For"], undefined);
+  assert.equal(headers["Accept-Encoding"], "gzip, deflate, br");
 });
 
 test("AntigravityExecutor.transformRequest normalizes model, project and contents", async () => {
@@ -69,15 +99,95 @@ test("AntigravityExecutor.transformRequest normalizes model, project and content
     projectId: "project-1",
   });
 
+  if (result instanceof Response) throw new Error("Unexpected Response from transformRequest");
   assert.equal(result.project, "project-1");
   assert.equal(result.model, "gemini-3.1-pro-low");
+  assert.deepEqual(Object.keys(result), [
+    "project",
+    "requestId",
+    "request",
+    "model",
+    "userAgent",
+    "requestType",
+    "enabledCreditTypes",
+  ]);
   assert.equal(result.userAgent, "antigravity");
+  assert.match(result.requestId, /^agent\/\d+\/[0-9a-f]{8}$/);
+  assert.deepEqual(result.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
   assert.ok(result.request.sessionId);
+  assert.equal(result.request.generationConfig.topK, 40);
+  assert.equal(result.request.generationConfig.topP, 1.0);
   assert.deepEqual(result.request.toolConfig, {
     functionCallingConfig: { mode: "VALIDATED" },
   });
   assert.deepEqual(result.request.contents[0].parts, [{ text: "keep me" }]);
   assert.equal(result.request.contents[1].role, "user");
+});
+
+test("AntigravityExecutor.transformRequest strips thinking config for Cloud Code models that do not support reasoning", async () => {
+  const executor = new AntigravityExecutor();
+  const body = {
+    reasoning_effort: "high",
+    request: {
+      generationConfig: {
+        thinkingConfig: {
+          thinkingBudget: 8192,
+          includeThoughts: true,
+        },
+      },
+      contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+    },
+  };
+
+  const result = await executor.transformRequest("antigravity/claude-sonnet-4-6", body, true, {
+    projectId: "project-1",
+  });
+
+  if (result instanceof Response) throw new Error("Unexpected Response from transformRequest");
+  const generationConfig = result.request.generationConfig as {
+    thinkingConfig?: { thinkingBudget?: number; includeThoughts?: boolean };
+  };
+  assert.equal(result.reasoning_effort, undefined);
+  assert.equal(generationConfig.thinkingConfig, undefined);
+});
+
+test("AntigravityExecutor.transformRequest preserves thinking config for supported Gemini models", async () => {
+  const executor = new AntigravityExecutor();
+  const body = {
+    request: {
+      generationConfig: {
+        thinkingConfig: {
+          thinkingBudget: 8192,
+          includeThoughts: true,
+        },
+      },
+      contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+    },
+  };
+
+  const result = await executor.transformRequest("antigravity/gemini-3.1-pro-high", body, true, {
+    projectId: "project-1",
+  });
+
+  if (result instanceof Response) throw new Error("Unexpected Response from transformRequest");
+  const generationConfig = result.request.generationConfig as {
+    thinkingConfig: { thinkingBudget?: number; includeThoughts?: boolean };
+  };
+  assert.equal(generationConfig.thinkingConfig.thinkingBudget, 8192);
+  assert.equal(generationConfig.thinkingConfig.includeThoughts, true);
+});
+
+test("AntigravityExecutor.transformRequest tolerates a missing body when projectId is present", async () => {
+  const executor = new AntigravityExecutor();
+
+  const result = await executor.transformRequest("antigravity/gemini-3.1-pro", null, true, {
+    projectId: "project-1",
+  });
+
+  if (result instanceof Response) throw new Error("Unexpected Response from transformRequest");
+  assert.equal(result.project, "project-1");
+  assert.equal(result.model, "gemini-3.1-pro-low");
+  assert.ok(result.request.sessionId);
 });
 
 test("AntigravityExecutor.transformRequest returns a structured error response when projectId is missing", async () => {
@@ -88,7 +198,7 @@ test("AntigravityExecutor.transformRequest returns a structured error response w
     true,
     {}
   );
-  const payload = await result.json();
+  const payload = (await result.json()) as any;
 
   assert.equal(result.status, 422);
   assert.equal(payload.error.code, "missing_project_id");
@@ -112,6 +222,7 @@ test("AntigravityExecutor.transformRequest allows body project overrides when th
       { projectId: "credential-project" }
     );
 
+    if (result instanceof Response) throw new Error("Unexpected Response from transformRequest");
     assert.equal(result.project, "body-project");
     assert.equal(result.request.sessionId, "session-fixed");
     assert.equal(result.model, "gemini-2.5-pro");
@@ -166,7 +277,7 @@ test("AntigravityExecutor.collectStreamToResponse turns SSE Gemini chunks into a
     { Authorization: "Bearer ag-token" },
     { request: {} }
   );
-  const payload = await result.response.json();
+  const payload = (await result.response.json()) as any;
 
   assert.equal(result.response.status, 200);
   assert.equal(payload.object, "chat.completion");
@@ -176,6 +287,70 @@ test("AntigravityExecutor.collectStreamToResponse turns SSE Gemini chunks into a
     prompt_tokens: 5,
     completion_tokens: 3,
     total_tokens: 8,
+  });
+});
+
+test("AntigravityExecutor.collectStreamToResponse parses fragmented SSE lines incrementally", async () => {
+  const executor = new AntigravityExecutor();
+  const encoder = new TextEncoder();
+  const streamText = [
+    `data: ${JSON.stringify({
+      response: {
+        candidates: [{ content: { parts: [{ text: "Frag" }] } }],
+      },
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      response: {
+        candidates: [
+          {
+            content: { parts: [{ text: "mented" }] },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 9,
+          candidatesTokenCount: 4,
+          totalTokenCount: 13,
+        },
+      },
+    })}\n\n`,
+  ].join("");
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const chunk of [
+          streamText.slice(0, 6),
+          streamText.slice(6, 31),
+          streamText.slice(31, 79),
+          streamText.slice(79, 143),
+          streamText.slice(143),
+        ]) {
+          controller.enqueue(encoder.encode(chunk));
+        }
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    }
+  );
+
+  const result = await executor.collectStreamToResponse(
+    response,
+    "gemini-2.5-flash",
+    "https://example.com",
+    { Authorization: "Bearer ag-token" },
+    { request: {} }
+  );
+  const payload = (await result.response.json()) as any;
+
+  assert.equal(payload.choices[0].message.content, "Fragmented");
+  assert.equal(payload.choices[0].finish_reason, "stop");
+  assert.deepEqual(payload.usage, {
+    prompt_tokens: 9,
+    completion_tokens: 4,
+    total_tokens: 13,
   });
 });
 
@@ -215,6 +390,7 @@ test("AntigravityExecutor.execute auto-retries short 429 responses and collects 
   const originalFetch = globalThis.fetch;
   const originalSetTimeout = globalThis.setTimeout;
   const calls = [];
+  seedAntigravityVersionCache("2026.04.17-test");
 
   globalThis.fetch = async (url) => {
     calls.push(String(url));
@@ -237,20 +413,20 @@ test("AntigravityExecutor.execute auto-retries short 429 responses and collects 
       }
     );
   };
-  globalThis.setTimeout = (callback) => {
-    callback();
+  globalThis.setTimeout = ((callback) => {
+    (callback as () => void)();
     return 0;
-  };
+  }) as typeof setTimeout;
 
   try {
     const result = await executor.execute({
       model: "antigravity/gemini-2.5-flash",
       body: { request: { contents: [] } },
       stream: false,
-      credentials: { accessToken: "token", projectId: "project-1" },
+      credentials: { accessToken: "token", projectId: "project-1" } as any,
       log: { debug() {}, warn() {} },
     });
-    const payload = await result.response.json();
+    const payload = (await result.response.json()) as any;
 
     assert.equal(calls.length, 2);
     assert.equal(result.response.status, 200);
@@ -269,6 +445,7 @@ test("AntigravityExecutor.execute auto-retries short 429 responses and collects 
 test("AntigravityExecutor.execute embeds retryAfterMs when the upstream asks for a long wait", async () => {
   const executor = new AntigravityExecutor();
   const originalFetch = globalThis.fetch;
+  seedAntigravityVersionCache("2026.04.17-test");
 
   globalThis.fetch = async () =>
     new Response(
@@ -288,14 +465,119 @@ test("AntigravityExecutor.execute embeds retryAfterMs when the upstream asks for
       model: "antigravity/gemini-2.5-flash",
       body: { request: { contents: [] } },
       stream: true,
-      credentials: { accessToken: "token", projectId: "project-1" },
+      credentials: { accessToken: "token", projectId: "project-1" } as any,
       log: { debug() {}, warn() {} },
     });
-    const payload = await result.response.json();
+    const payload = (await result.response.json()) as any;
 
     assert.equal(result.response.status, 429);
     assert.equal(payload.retryAfterMs, 7_200_000);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("AntigravityExecutor.execute applies CLI fingerprint when enabled", async () => {
+  const executor = new AntigravityExecutor();
+  const originalFetch = globalThis.fetch;
+  seedAntigravityVersionCache("2026.04.17-test");
+  setCliCompatProviders(["antigravity"]);
+
+  globalThis.fetch = async (_url, init) => {
+    const headers = init?.headers as Record<string, string>;
+    const parsedBody = JSON.parse(String(init?.body));
+
+    assert.equal(
+      headers["User-Agent"],
+      "Antigravity/2026.04.17-test (Macintosh; Intel Mac OS X 10_15_7) Chrome/132.0.6834.160 Electron/39.2.3"
+    );
+    assert.equal(headers["x-client-name"], "antigravity");
+    assert.equal(headers["x-client-version"], "2026.04.17-test");
+    assert.equal(headers["x-goog-user-project"], "project-1");
+    assert.deepEqual(Object.keys(parsedBody), [
+      "project",
+      "requestId",
+      "request",
+      "model",
+      "userAgent",
+      "requestType",
+      "enabledCreditTypes",
+    ]);
+
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}]}}\n\n',
+      {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }
+    );
+  };
+
+  try {
+    const result = await withEnv("ANTIGRAVITY_CREDITS", "always", () =>
+      executor.execute({
+        model: "antigravity/gemini-2.5-flash",
+        body: { request: { contents: [] } },
+        stream: false,
+        credentials: { accessToken: "token", projectId: "project-1" } as any,
+        log: { debug() {}, warn() {}, info() {} },
+      })
+    );
+
+    assert.equal(result.response.status, 200);
+  } finally {
+    setCliCompatProviders([]);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AntigravityExecutor.transformRequest maps Claude models through Gemini contents schema", async () => {
+  const executor = new AntigravityExecutor();
+  const body = {
+    project: "project-1",
+    model: "claude-sonnet-4-6",
+    userAgent: "antigravity",
+    requestId: "agent-123",
+    requestType: "agent",
+    request: {
+      contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      systemInstruction: { role: "system", parts: [{ text: "System prompt" }] },
+      generationConfig: {
+        temperature: 1,
+        maxOutputTokens: 16384,
+      },
+      messages: [{ role: "user", content: [{ type: "text", text: "Legacy Anthropic field" }] }],
+      system: [{ type: "text", text: "Legacy system field" }],
+      max_tokens: 16384,
+      stream: true,
+      temperature: 1,
+    },
+  };
+
+  const result = (await executor.transformRequest("antigravity/claude-sonnet-4-6", body, true, {
+    projectId: "project-1",
+  })) as any;
+
+  assert.equal(result.project, "project-1");
+  assert.equal(result.model, "claude-sonnet-4-6");
+  assert.equal(result.requestType, "agent");
+  assert.ok(result.request.sessionId);
+  assert.deepEqual(result.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+  assert.deepEqual(result.request.contents, [{ role: "user", parts: [{ text: "Hello" }] }]);
+  assert.deepEqual(result.request.systemInstruction, {
+    role: "system",
+    parts: [{ text: "System prompt" }],
+  });
+  assert.deepEqual(result.request.generationConfig, {
+    temperature: 1,
+    maxOutputTokens: 16384,
+    topK: 40,
+    topP: 1.0,
+  });
+  assert.equal(result.request.messages, undefined);
+  assert.equal(result.request.system, undefined);
+  assert.equal(result.request.max_tokens, undefined);
+  assert.equal(result.request.stream, undefined);
+  assert.equal(result.request.temperature, undefined);
+  assert.equal(result.request.toolConfig, undefined);
 });

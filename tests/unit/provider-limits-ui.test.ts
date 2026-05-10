@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 const providerLimitUtils =
   await import("../../src/app/(dashboard)/dashboard/usage/components/ProviderLimits/utils.tsx");
+const providerConstants = await import("../../src/shared/constants/providers.ts");
 
 test("provider plan fallbacks normalize to Unknown instead of repeating provider labels", () => {
   const tier = providerLimitUtils.normalizePlanTier("Claude Code");
@@ -15,6 +16,9 @@ test("paid individual tiers use non-gray badge variants", () => {
   assert.equal(providerLimitUtils.normalizePlanTier("Plus").variant, "success");
   assert.equal(providerLimitUtils.normalizePlanTier("Pro").variant, "success");
   assert.equal(providerLimitUtils.normalizePlanTier("Student").variant, "success");
+  assert.equal(providerLimitUtils.normalizePlanTier("Lite").key, "lite");
+  assert.equal(providerLimitUtils.normalizePlanTier("Lite").label, "Lite");
+  assert.notEqual(providerLimitUtils.normalizePlanTier("Lite").variant, "default");
   assert.equal(providerLimitUtils.normalizePlanTier("Free").variant, "default");
 });
 
@@ -26,6 +30,17 @@ test("Codex workspacePlanType is used when live plan is missing or unknown", () 
   assert.equal(resolvedPlan, "plus");
   const tier = providerLimitUtils.normalizePlanTier(resolvedPlan);
   assert.equal(tier.key, "plus");
+  assert.equal(tier.variant, "success");
+});
+
+test("Claude providerSpecificData plan is used when live plan is missing", () => {
+  const resolvedPlan = providerLimitUtils.resolvePlanValue(null, {
+    plan: "Pro",
+  });
+
+  assert.equal(resolvedPlan, "Pro");
+  const tier = providerLimitUtils.normalizePlanTier(resolvedPlan);
+  assert.equal(tier.key, "pro");
   assert.equal(tier.variant, "success");
 });
 
@@ -52,4 +67,60 @@ test("quota labels normalize session and weekly windows while preserving readabl
   assert.equal(providerLimitUtils.formatQuotaLabel("weekly (7d)"), "Weekly");
   assert.equal(providerLimitUtils.formatQuotaLabel("weekly sonnet (7d)"), "Weekly Sonnet");
   assert.equal(providerLimitUtils.formatQuotaLabel("code_review"), "Code Review");
+  assert.equal(providerLimitUtils.formatQuotaLabel("mcp_monthly"), "Monthly");
+});
+
+test("MiniMax providers are exposed to the limits dashboard support list", () => {
+  assert.ok(providerConstants.USAGE_SUPPORTED_PROVIDERS.includes("zai"));
+  assert.ok(providerConstants.USAGE_SUPPORTED_PROVIDERS.includes("minimax"));
+  assert.ok(providerConstants.USAGE_SUPPORTED_PROVIDERS.includes("minimax-cn"));
+});
+
+test("MiniMax quota payloads use generic provider parsing and stale resets still refill", () => {
+  const future = new Date(Date.now() + 5 * 60_000).toISOString();
+  const past = new Date(Date.now() - 5 * 60_000).toISOString();
+
+  const parsed = providerLimitUtils.parseQuotaData("minimax", {
+    quotas: {
+      "session (5h)": {
+        used: 400,
+        total: 1500,
+        remaining: 1100,
+        remainingPercentage: 73.3,
+        resetAt: future,
+      },
+      "weekly (7d)": {
+        used: 1200,
+        total: 15000,
+        remaining: 13800,
+        remainingPercentage: 92,
+        resetAt: past,
+      },
+    },
+  });
+
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].name, "session (5h)");
+  assert.equal(parsed[0].used, 400);
+  assert.equal(parsed[0].total, 1500);
+  assert.equal(parsed[1].name, "weekly (7d)");
+  assert.equal(parsed[1].used, 0);
+  assert.equal(parsed[1].remainingPercentage, 100);
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[0].name), "Session");
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[1].name), "Weekly");
+});
+
+test("GLM quota rows are ordered by session, weekly, then monthly", () => {
+  const parsed = providerLimitUtils.parseQuotaData("glm", {
+    quotas: {
+      mcp_monthly: { used: 10, total: 100, remainingPercentage: 90 },
+      weekly: { used: 20, total: 100, remainingPercentage: 80 },
+      session: { used: 30, total: 100, remainingPercentage: 70 },
+    },
+  });
+
+  assert.deepEqual(
+    parsed.map((quota) => quota.name),
+    ["session", "weekly", "mcp_monthly"]
+  );
 });

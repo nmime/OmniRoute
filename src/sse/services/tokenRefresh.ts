@@ -8,7 +8,7 @@ import {
   refreshGoogleToken as _refreshGoogleToken,
   refreshQwenToken as _refreshQwenToken,
   refreshCodexToken as _refreshCodexToken,
-  refreshIflowToken as _refreshIflowToken,
+  refreshQoderToken as _refreshQoderToken,
   refreshGitHubToken as _refreshGitHubToken,
   refreshCopilotToken as _refreshCopilotToken,
   getAccessToken as _getAccessToken,
@@ -16,6 +16,32 @@ import {
   formatProviderCredentials as _formatProviderCredentials,
   getAllAccessTokens as _getAllAccessTokens,
 } from "@omniroute/open-sse/services/tokenRefresh.ts";
+
+// Per-connection mutex: prevents concurrent OAuth refresh for rotating tokens.
+// Key = connectionId, Value = { promise: in-flight refresh, waiters: count of callers sharing it }
+const connectionRefreshMutex = new Map<string, { promise: Promise<any>; waiters: number }>();
+
+export async function withConnectionRefreshMutex<T>(
+  connectionId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const existing = connectionRefreshMutex.get(connectionId);
+  if (existing) {
+    existing.waiters++;
+    log.info("TOKEN_REFRESH", "Concurrent refresh detected — sharing in-flight refresh", {
+      connectionId,
+      waiters: existing.waiters,
+    });
+    return existing.promise as Promise<T>;
+  }
+
+  const entry: { promise: Promise<T>; waiters: number } = { promise: null as any, waiters: 0 };
+  entry.promise = fn().finally(() => {
+    connectionRefreshMutex.delete(connectionId);
+  });
+  connectionRefreshMutex.set(connectionId, entry);
+  return entry.promise;
+}
 
 export const TOKEN_EXPIRY_BUFFER_MS = BUFFER_MS;
 
@@ -53,9 +79,9 @@ export const refreshCodexToken = async (refreshToken: string) => {
   return _refreshCodexToken(refreshToken, log, proxy);
 };
 
-export const refreshIflowToken = async (refreshToken: string) => {
+export const refreshQoderToken = async (refreshToken: string) => {
   const proxy = await resolveProxyForProvider("qoder");
-  return _refreshIflowToken(refreshToken, log, proxy);
+  return _refreshQoderToken(refreshToken, log, proxy);
 };
 
 export const refreshGitHubToken = async (refreshToken: string) => {
@@ -95,11 +121,25 @@ export async function updateProviderCredentials(connectionId: string, newCredent
       updates.refreshToken = newCredentials.refreshToken;
     }
     if (newCredentials.expiresIn) {
-      updates.expiresAt = new Date(Date.now() + newCredentials.expiresIn * 1000).toISOString();
+      const expiresAt = new Date(Date.now() + newCredentials.expiresIn * 1000).toISOString();
+      updates.expiresAt = expiresAt;
+      updates.tokenExpiresAt = expiresAt;
       updates.expiresIn = newCredentials.expiresIn;
+    } else if (newCredentials.expiresAt) {
+      updates.expiresAt = newCredentials.expiresAt;
+      updates.tokenExpiresAt = newCredentials.expiresAt;
     }
     if (newCredentials.providerSpecificData) {
       updates.providerSpecificData = newCredentials.providerSpecificData;
+    }
+    // Cookie/session providers (chatgpt-web, ...) refresh by rotating the
+    // stored apiKey blob — propagate that here too so DB credentials don't
+    // go stale after Set-Cookie rotation.
+    if (newCredentials.apiKey) {
+      updates.apiKey = newCredentials.apiKey;
+    }
+    if (newCredentials.testStatus) {
+      updates.testStatus = newCredentials.testStatus;
     }
 
     const result = await updateProviderConnection(connectionId, updates);
@@ -132,7 +172,12 @@ export async function checkAndRefreshToken(provider: string, credentials: any) {
         expiresIn: Math.round((expiresAt - now) / 1000),
       });
 
-      const newCredentials = await getAccessToken(provider, updatedCredentials);
+      const connectionId: string | undefined = updatedCredentials.connectionId;
+      const newCredentials = connectionId
+        ? await withConnectionRefreshMutex(connectionId, () =>
+            getAccessToken(provider, updatedCredentials)
+          )
+        : await getAccessToken(provider, updatedCredentials);
       if (newCredentials && newCredentials.accessToken) {
         await updateProviderCredentials(updatedCredentials.connectionId, newCredentials);
 

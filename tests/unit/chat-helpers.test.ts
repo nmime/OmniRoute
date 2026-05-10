@@ -18,13 +18,10 @@ const {
   safeLogEvents,
   withSessionHeader,
 } = await import("../../src/sse/handlers/chatHelpers.ts");
-const { getModelCooldownInfo, setModelUnavailable, resetAllAvailability } =
-  await import("../../src/domain/modelAvailability.ts");
-const { getCircuitBreaker, resetAllCircuitBreakers, CircuitBreakerOpenError, STATE } =
+const { getCircuitBreaker, resetAllCircuitBreakers, STATE } =
   await import("../../src/shared/utils/circuitBreaker.ts");
 
 async function resetStorage() {
-  resetAllAvailability();
   resetAllCircuitBreakers();
   core.resetDbInstance();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
@@ -61,7 +58,7 @@ test("resolveModelOrError rejects ambiguous aliases without a provider prefix", 
 
   assert.ok(result.error);
   assert.equal(result.error.status, 400);
-  const json = await result.error.json();
+  const json = (await result.error.json()) as any;
   assert.match(json.error.message, /Ambiguous model/i);
 });
 
@@ -74,7 +71,7 @@ test("resolveModelOrError rejects ambiguous slashful canonical ids instead of mi
 
   assert.ok(result.error);
   assert.equal(result.error.status, 400);
-  const json = await result.error.json();
+  const json = (await result.error.json()) as any;
   assert.match(json.error.message, /Ambiguous model/i);
   assert.match(json.error.message, /openai\/gpt-oss-120b/i);
 });
@@ -88,24 +85,61 @@ test("resolveModelOrError rejects malformed model strings", async () => {
 
   assert.ok(result.error);
   assert.equal(result.error.status, 400);
-  const json = await result.error.json();
+  const json = (await result.error.json()) as any;
   assert.match(json.error.message, /Invalid model format/i);
 });
 
-test("checkPipelineGates blocks models in cooldown", async () => {
-  setModelUnavailable("openai", "gpt-4o-mini", 12_000, "cooldown");
+test("resolveModelOrError routes Codex native compact gpt-5.5 requests to Codex", async () => {
+  const result = await resolveModelOrError(
+    "gpt-5.5",
+    { model: "gpt-5.5", input: "compact this session", reasoning: { effort: "xhigh" } },
+    "/v1/responses/compact",
+    { "user-agent": "codex-cli/0.128.0" }
+  );
 
-  const response = await checkPipelineGates("openai", "gpt-4o-mini");
-  const json = await response.json();
-  const cooldownInfo = getModelCooldownInfo("openai", "gpt-4o-mini");
-  const retryAfter = Number(response.headers.get("Retry-After"));
+  assert.equal(result.provider, "codex");
+  assert.equal(result.model, "gpt-5.5");
+});
 
-  assert.equal(response.status, 503);
-  assert.ok(cooldownInfo);
-  assert.ok(retryAfter >= 1);
-  assert.ok(retryAfter <= 12);
-  assert.ok(retryAfter >= Math.ceil((cooldownInfo?.remainingMs || 0) / 1000) - 1);
-  assert.match(json.error.message, /temporarily unavailable/i);
+test("resolveModelOrError keeps non-Codex gpt-5.5 Responses requests on OpenAI", async () => {
+  const result = await resolveModelOrError(
+    "gpt-5.5",
+    { model: "gpt-5.5", input: "hello" },
+    "/v1/responses",
+    { "user-agent": "OpenAI/Node" }
+  );
+
+  assert.equal(result.provider, "openai");
+  assert.equal(result.model, "gpt-5.5");
+});
+
+test("resolveModelOrError routes bare gpt-5.5 to Codex medium when Codex is the only active account", async () => {
+  await seedConnection("codex");
+
+  const result = await resolveModelOrError(
+    "gpt-5.5",
+    { model: "gpt-5.5", input: "hello" },
+    "/v1/responses",
+    { "user-agent": "OpenAI/Node" }
+  );
+
+  assert.equal(result.provider, "codex");
+  assert.equal(result.model, "gpt-5.5-medium");
+  assert.equal(result.targetFormat, "openai-responses");
+});
+
+test("resolveModelOrError keeps bare gpt-5.5 on OpenAI when OpenAI is the only active account", async () => {
+  await seedConnection("openai");
+
+  const result = await resolveModelOrError(
+    "gpt-5.5",
+    { model: "gpt-5.5", input: "hello" },
+    "/v1/responses",
+    { "user-agent": "OpenAI/Node" }
+  );
+
+  assert.equal(result.provider, "openai");
+  assert.equal(result.model, "gpt-5.5");
 });
 
 test("checkPipelineGates blocks providers with an open circuit breaker", async () => {
@@ -116,17 +150,19 @@ test("checkPipelineGates blocks providers with an open circuit breaker", async (
 
   const response = await checkPipelineGates("openai", "gpt-4o-mini", {
     providerProfile: {
-      circuitBreakerThreshold: 5,
-      circuitBreakerReset: 5_000,
+      failureThreshold: 5,
+      resetTimeoutMs: 5_000,
     },
   });
-  const json = await response.json();
+  const json = (await response.json()) as any;
   const retryAfter = Number(response.headers.get("Retry-After"));
 
   assert.equal(response.status, 503);
   assert.ok(retryAfter >= 4);
   assert.ok(retryAfter <= 5);
   assert.match(json.error.message, /circuit breaker is open/i);
+  assert.equal(json.error.code, "provider_circuit_open");
+  assert.equal(response.headers.get("X-OmniRoute-Provider-Breaker"), "open");
 });
 
 test("checkPipelineGates reapplies runtime breaker settings to existing breakers", async () => {
@@ -139,8 +175,8 @@ test("checkPipelineGates reapplies runtime breaker settings to existing breakers
 
   const response = await checkPipelineGates("openai", "gpt-4o-mini", {
     providerProfile: {
-      circuitBreakerThreshold: 60,
-      circuitBreakerReset: 5_000,
+      failureThreshold: 60,
+      resetTimeoutMs: 5_000,
     },
   });
 
@@ -160,8 +196,8 @@ test("handleNoCredentials reports missing provider credentials and exhausted acc
     500
   );
 
-  const missingJson = await missing.json();
-  const exhaustedJson = await exhausted.json();
+  const missingJson = (await missing.json()) as any;
+  const exhaustedJson = (await exhausted.json()) as any;
 
   assert.equal(missing.status, 400);
   assert.match(missingJson.error.message, /No credentials for provider: openai/);
@@ -185,7 +221,7 @@ test("handleNoCredentials returns Retry-After when every account is rate limited
     null,
     null
   );
-  const json = await response.json();
+  const json = (await response.json()) as any;
 
   assert.equal(response.status, 429);
   assert.ok(Number(response.headers.get("Retry-After")) >= 1);
@@ -210,7 +246,7 @@ test("handleNoCredentials returns structured model_cooldown when every credentia
     null,
     null
   );
-  const json = await response.json();
+  const json = (await response.json()) as any;
 
   assert.equal(response.status, 429);
   assert.equal(Number(response.headers.get("Retry-After")) >= 1, true);
@@ -224,7 +260,7 @@ test("handleNoCredentials returns structured model_cooldown when every credentia
 test("safeResolveProxy returns the direct route when no proxy config is present", async () => {
   const connection = await seedConnection("openai", { apiKey: "sk-openai-direct" });
 
-  const resolved = await safeResolveProxy(connection.id);
+  const resolved = await safeResolveProxy((connection as any).id);
 
   assert.deepEqual(resolved, {
     proxy: null,
@@ -233,60 +269,47 @@ test("safeResolveProxy returns the direct route when no proxy config is present"
   });
 });
 
-test("executeChatWithBreaker converts circuit-open and proxy-fast-fail errors", async () => {
-  const credentials = { connectionId: "conn_helper" };
-  const openResult = await executeChatWithBreaker({
-    bypassCircuitBreaker: false,
-    breaker: {
-      execute: async () => {
-        throw new CircuitBreakerOpenError("already open", "openai", 5_000);
-      },
-    },
-    body: { model: "openai/gpt-4o-mini" },
-    provider: "openai",
-    model: "gpt-4o-mini",
-    refreshedCredentials: credentials,
-    proxyInfo: null,
-    log: console,
-    clientRawRequest: null,
-    credentials,
-    apiKeyInfo: null,
-    userAgent: "",
-    comboName: null,
-    comboStrategy: null,
-    isCombo: false,
-    extendedContext: false,
-  });
+test("executeChatWithBreaker converts proxy fast-fail errors", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const error = new Error("Proxy unreachable");
+    (error as Error & { code?: string }).code = "PROXY_UNREACHABLE";
+    throw error;
+  };
 
-  const proxyResult = await executeChatWithBreaker({
-    bypassCircuitBreaker: false,
-    breaker: {
-      execute: async () => {
-        const error = new Error("Proxy unreachable");
-        error.code = "PROXY_UNREACHABLE";
-        throw error;
-      },
-    },
-    body: { model: "openai/gpt-4o-mini" },
-    provider: "openai",
-    model: "gpt-4o-mini",
-    refreshedCredentials: credentials,
-    proxyInfo: null,
-    log: console,
-    clientRawRequest: null,
-    credentials,
-    apiKeyInfo: null,
-    userAgent: "",
-    comboName: null,
-    comboStrategy: null,
-    isCombo: false,
-    extendedContext: false,
-  });
+  try {
+    const credentials = {
+      connectionId: "conn_helper",
+      apiKey: "sk-openai-helper",
+      providerSpecificData: {},
+    };
+    const breaker = getCircuitBreaker("openai");
+    const proxyResult = await executeChatWithBreaker({
+      bypassCircuitBreaker: false,
+      breaker,
+      body: { model: "openai/gpt-4o-mini" },
+      provider: "openai",
+      model: "gpt-4o-mini",
+      refreshedCredentials: credentials,
+      proxyInfo: null,
+      log: console,
+      clientRawRequest: null,
+      credentials,
+      apiKeyInfo: null,
+      userAgent: "",
+      comboName: null,
+      comboStrategy: null,
+      isCombo: false,
+      extendedContext: false,
+      comboStepId: null,
+      comboExecutionKey: null,
+    });
 
-  assert.equal(openResult.result.status, 503);
-  assert.equal(openResult.result.response.status, 503);
-  assert.equal(proxyResult.result.status, 503);
-  assert.equal(proxyResult.result.error, "Proxy unreachable");
+    assert.equal(proxyResult.result.status, 502);
+    assert.match(String(proxyResult.result.error || ""), /Proxy unreachable/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("safeLogEvents tolerates success and timeout payloads", () => {

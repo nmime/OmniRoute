@@ -1,3 +1,13 @@
+import {
+  getStaticProviderCatalogGroup,
+  resolveProviderCatalogEntry,
+  type CompatibleProviderLabels,
+  type CompatibleProviderNodeLike,
+  type ProviderCatalogMetadata,
+  type ResolvedProviderCatalogEntry,
+  type StaticProviderCatalogCategory,
+} from "@/lib/providers/catalog";
+
 export interface ProviderStatsSnapshot {
   total?: number;
   [key: string]: unknown;
@@ -44,11 +54,49 @@ export function buildMergedOAuthProviderEntries<TProvider = Record<string, unkno
   ];
 }
 
+export function buildStaticProviderEntries(
+  category: StaticProviderCatalogCategory,
+  getProviderStats: GetProviderStats
+): ProviderEntry<ProviderCatalogMetadata>[] {
+  const group = getStaticProviderCatalogGroup(category);
+  return buildProviderEntries(
+    group.providers,
+    group.displayAuthType,
+    group.toggleAuthType,
+    getProviderStats
+  );
+}
+
 export function filterConfiguredProviderEntries<TProvider>(
   entries: ProviderEntry<TProvider>[],
-  showConfiguredOnly: boolean
+  showConfiguredOnly: boolean,
+  searchQuery?: string
 ): ProviderEntry<TProvider>[] {
-  if (!showConfiguredOnly) return entries;
+  let filtered = entries;
 
-  return entries.filter((entry) => Number(entry.stats?.total || 0) > 0);
+  if (showConfiguredOnly) {
+    filtered = filtered.filter((entry) => Number(entry.stats?.total || 0) > 0);
+  }
+
+  if (searchQuery && searchQuery.trim()) {
+    const query = searchQuery.trim().toLowerCase();
+    filtered = filtered.filter((entry) => {
+      const provider = entry.provider as Record<string, unknown>;
+      const name = String(provider.name || "").toLowerCase();
+      const id = entry.providerId.toLowerCase();
+      return name.includes(query) || id.includes(query);
+    });
+  }
+
+  return filtered;
+}
+
+export function resolveDashboardProviderInfo(
+  providerId: string,
+  options?: {
+    providerNode?: CompatibleProviderNodeLike | null;
+    compatibleLabels?: CompatibleProviderLabels | null;
+  }
+): ResolvedProviderCatalogEntry | null {
+  return resolveProviderCatalogEntry(providerId, options);
 }

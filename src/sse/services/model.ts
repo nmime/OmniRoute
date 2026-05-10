@@ -1,6 +1,6 @@
 // Re-export from open-sse with localDb integration
 import { getModelAliases, getComboByName, getProviderNodes, getCustomModels } from "@/lib/localDb";
-import { getSettings } from "@/lib/localDb";
+import { getCachedSettings } from "@/lib/localDb";
 import { getComboStepTarget } from "@/lib/combos/steps";
 import {
   parseModel,
@@ -83,7 +83,7 @@ export async function getModelInfo(modelStr) {
     // stripModelPrefix: if enabled, strip provider prefix and re-resolve
     // the bare model name using existing heuristics (claude-* → anthropic, etc.)
     try {
-      const settings = await getSettings();
+      const settings = await getCachedSettings();
       if (settings.stripModelPrefix === true) {
         const strippedResult = await getModelInfoCore(parsed.model, getModelAliases);
         return { ...strippedResult, extendedContext };
@@ -105,11 +105,21 @@ export async function getModelInfo(modelStr) {
  * @returns {Promise<Object|null>} Full combo object or null if not a combo
  */
 export async function getCombo(modelStr) {
-  // Check combo DB first (supports names with /)
-  const combo = await getComboByName(modelStr);
+  // Try exact match first (supports combos actually named "combo/ANY")
+  let combo = await getComboByName(modelStr);
   if (combo && combo.models && combo.models.length > 0) {
     return combo;
   }
+
+  // Fallback: Strip combo/ prefix if present
+  if (modelStr.startsWith("combo/")) {
+    const nameToSearch = modelStr.substring(6);
+    combo = await getComboByName(nameToSearch);
+    if (combo && combo.models && combo.models.length > 0) {
+      return combo;
+    }
+  }
+
   return null;
 }
 

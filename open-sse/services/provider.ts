@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { PROVIDERS } from "../config/constants.ts";
 import { getRegistryEntry } from "../config/providerRegistry.ts";
 import {
@@ -29,7 +30,10 @@ export function isClaudeCodeCompatible(provider) {
   return typeof provider === "string" && provider.startsWith(CLAUDE_CODE_COMPATIBLE_PREFIX);
 }
 
-export function getOpenAICompatibleType(provider, providerSpecificData = null) {
+export function getOpenAICompatibleType(
+  provider,
+  providerSpecificData: Record<string, unknown> | null = null
+) {
   if (!isOpenAICompatible(provider)) return "chat";
   const configuredType =
     providerSpecificData &&
@@ -82,17 +86,6 @@ function buildAnthropicCompatibleUrl(baseUrl) {
 // contain max_tokens or Claude model names.
 export function detectFormatFromEndpoint(body, endpointPath = "") {
   const path = String(endpointPath || "");
-  const hasInputField =
-    body &&
-    typeof body === "object" &&
-    Object.prototype.hasOwnProperty.call(body, "input") &&
-    body.input !== undefined;
-  const hasResponsesSpecificFields =
-    body &&
-    typeof body === "object" &&
-    (body.max_output_tokens !== undefined ||
-      body.previous_response_id !== undefined ||
-      body.reasoning !== undefined);
 
   if (/\/responses(?=\/|$)/i.test(path) || /^responses(?=\/|$)/i.test(path)) {
     return "openai-responses";
@@ -106,9 +99,6 @@ export function detectFormatFromEndpoint(body, endpointPath = "") {
     /\/(?:chat\/completions|completions)(?=\/|$)/i.test(path) ||
     /^(?:chat\/completions|completions)(?=\/|$)/i.test(path)
   ) {
-    if (hasInputField || hasResponsesSpecificFields) {
-      return "openai-responses";
-    }
     return "openai";
   }
 
@@ -277,7 +267,10 @@ export function buildProviderUrl(
     }
     // Custom URL builder (e.g. gemini, gemini-cli)
     if (entry.urlBuilder) {
-      return entry.urlBuilder(entry.baseUrl, model, stream);
+      const baseUrl = entry.baseUrl || config.baseUrl;
+      if (baseUrl) {
+        return entry.urlBuilder(baseUrl, model, stream);
+      }
     }
     // URL suffix (e.g. claude: ?beta=true)
     if (entry.urlSuffix) {
@@ -339,6 +332,11 @@ export function buildProviderHeaders(provider, credentials, stream = true, body 
       if (token) {
         headers["x-api-key"] = token;
       }
+    } else if (authHeader === "key") {
+      const token = credentials.apiKey || credentials.accessToken;
+      if (token) {
+        headers["Authorization"] = `Key ${token}`;
+      }
     } else if (authHeader === "x-goog-api-key") {
       if (credentials.apiKey) {
         headers["x-goog-api-key"] = credentials.apiKey;
@@ -393,11 +391,10 @@ export function hasThinkingConfig(body) {
 }
 
 // Normalize thinking config based on last message role
-// - If lastMessage is not user → remove thinking config
-// - If lastMessage is user AND has thinking config → keep it (force enable)
+// - If lastMessage is not user → remove Claude/Gemini-style thinking config
+// - Keep OpenAI Chat Completions reasoning_effort as a request-level option.
 export function normalizeThinkingConfig(body) {
   if (!isLastMessageFromUser(body)) {
-    delete body.reasoning_effort;
     delete body.thinking;
   }
   return body;

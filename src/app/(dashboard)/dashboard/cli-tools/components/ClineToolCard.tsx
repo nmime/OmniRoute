@@ -2,9 +2,10 @@
 
 import { useState, useEffect, useRef } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
-import Image from "next/image";
+import ProviderIcon from "@/shared/components/ProviderIcon";
 import CliStatusBadge from "./CliStatusBadge";
 import { useTranslations } from "next-intl";
+import { DEFAULT_DISPLAY_BASE_URL } from "@/shared/hooks";
 
 const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
 
@@ -26,7 +27,7 @@ export default function ClineToolCard({
   const [applying, setApplying] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [message, setMessage] = useState(null);
-  const [selectedApiKey, setSelectedApiKey] = useState("");
+  const [selectedApiKeyId, setSelectedApiKeyId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [modelAliases, setModelAliases] = useState({});
@@ -54,11 +55,13 @@ export default function ClineToolCard({
   // Use batch status as fallback when card hasn't been expanded yet
   const effectiveConfigStatus = configStatus || batchStatus?.configStatus || null;
 
+  // (#523) Store the key *id* (not the masked string) so the backend can
+  // resolve the real secret from DB before writing to config files.
   useEffect(() => {
-    if (apiKeys?.length > 0 && !selectedApiKey) {
-      setSelectedApiKey(apiKeys[0].key);
+    if (apiKeys?.length > 0 && !selectedApiKeyId) {
+      setSelectedApiKeyId(apiKeys[0].id);
     }
-  }, [apiKeys, selectedApiKey]);
+  }, [apiKeys, selectedApiKeyId]);
 
   useEffect(() => {
     if (isExpanded && !clineStatus) {
@@ -116,7 +119,12 @@ export default function ClineToolCard({
         await fetchBackups();
       } else {
         const data = await res.json();
-        setMessage({ type: "error", text: data.error || t("failedRestoreBackup") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedRestoreBackup"),
+        });
       }
     } catch (e) {
       setMessage({ type: "error", text: e.message });
@@ -140,7 +148,7 @@ export default function ClineToolCard({
 
   const getEffectiveBaseUrl = () => {
     if (customBaseUrl) return customBaseUrl;
-    return baseUrl || "http://localhost:20128";
+    return baseUrl || DEFAULT_DISPLAY_BASE_URL;
   };
 
   const handleApply = async () => {
@@ -152,12 +160,16 @@ export default function ClineToolCard({
         ? effectiveBaseUrl
         : `${effectiveBaseUrl}/v1`;
 
+      // (#523) Prefer keyId lookup so the backend writes the real key to disk.
+      const selectedKeyId = selectedApiKeyId?.trim() || null;
+
       const res = await fetch("/api/cli-tools/cline-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           baseUrl: normalizedBaseUrl,
-          apiKey: selectedApiKey || "sk_omniroute",
+          apiKey: !cloudEnabled ? "sk_omniroute" : null,
+          keyId: selectedKeyId,
           model: selectedModel,
         }),
       });
@@ -167,7 +179,10 @@ export default function ClineToolCard({
         await checkClineStatus();
         await fetchBackups();
       } else {
-        setMessage({ type: "error", text: data.error || t("failed") });
+        setMessage({
+          type: "error",
+          text: (typeof data.error === "string" ? data.error : data.error?.message) || t("failed"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -189,7 +204,10 @@ export default function ClineToolCard({
         await checkClineStatus();
         await fetchBackups();
       } else {
-        setMessage({ type: "error", text: data.error || t("failed") });
+        setMessage({
+          type: "error",
+          text: (typeof data.error === "string" ? data.error : data.error?.message) || t("failed"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -205,7 +223,15 @@ export default function ClineToolCard({
 
   const handleManualConfig = (config) => {
     if (config.model) setSelectedModel(config.model);
-    if (config.apiKey) setSelectedApiKey(config.apiKey);
+    // (#523) Match apiKey string to key id if possible
+    if (config.apiKey && apiKeys?.length > 0) {
+      const prefix = config.apiKey.slice(0, 8);
+      const suffix = config.apiKey.slice(-4);
+      const matchedKey = apiKeys.find(
+        (k) => k.key && k.key.startsWith(prefix) && k.key.endsWith(suffix)
+      );
+      if (matchedKey) setSelectedApiKeyId(matchedKey.id);
+    }
     if (config.baseUrl) setCustomBaseUrl(config.baseUrl);
     setShowManualConfigModal(false);
   };
@@ -215,23 +241,7 @@ export default function ClineToolCard({
       <div className="flex items-center justify-between hover:cursor-pointer" onClick={onToggle}>
         <div className="flex items-center gap-3">
           <div className="size-8 rounded-lg flex items-center justify-center shrink-0">
-            {tool.image ? (
-              <Image
-                src={tool.image}
-                alt={tool.name}
-                width={32}
-                height={32}
-                className="size-8 object-contain rounded-lg"
-                sizes="32px"
-                onError={(e) => {
-                  (e.currentTarget as HTMLElement).style.display = "none";
-                }}
-              />
-            ) : (
-              <span className="material-symbols-outlined text-xl" style={{ color: tool.color }}>
-                terminal
-              </span>
-            )}
+            <ProviderIcon providerId={tool.id || "cline"} size={32} type="color" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -353,12 +363,12 @@ export default function ClineToolCard({
                     <label className="text-sm text-text-muted">{t("apiKey")}</label>
                     {apiKeys && apiKeys.length > 0 ? (
                       <select
-                        value={selectedApiKey}
-                        onChange={(e) => setSelectedApiKey(e.target.value)}
+                        value={selectedApiKeyId}
+                        onChange={(e) => setSelectedApiKeyId(e.target.value)}
                         className="px-3 py-2 bg-bg-secondary rounded-lg text-sm border border-border focus:outline-none focus:ring-1 focus:ring-primary/50"
                       >
                         {apiKeys.map((key) => (
-                          <option key={key.id} value={key.key}>
+                          <option key={key.id} value={key.id}>
                             {key.key}
                           </option>
                         ))}
@@ -471,7 +481,7 @@ export default function ClineToolCard({
             onApply: handleManualConfig,
             currentConfig: {
               model: selectedModel,
-              apiKey: selectedApiKey,
+              apiKey: apiKeys?.find((k) => k.id === selectedApiKeyId)?.key || "",
               baseUrl: customBaseUrl || baseUrl,
             },
           } as any)}

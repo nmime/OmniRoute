@@ -3,6 +3,7 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+import { requireCliToolsAuth } from "@/lib/api/requireCliToolsAuth";
 import {
   ensureCliConfigWriteAllowed,
   getCliPrimaryConfigPath,
@@ -12,7 +13,7 @@ import { createBackup } from "@/shared/services/backupService";
 import { saveCliToolLastConfigured, deleteCliToolLastConfigured } from "@/lib/db/cliToolState";
 import { cliModelConfigSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
-import { getApiKeyById } from "@/lib/localDb";
+import { resolveApiKey } from "@/shared/services/apiKeyResolver";
 
 const getDroidSettingsPath = () => getCliPrimaryConfigPath("droid");
 const getDroidDir = () => path.dirname(getDroidSettingsPath());
@@ -36,7 +37,10 @@ const hasOmniRouteConfig = (settings: any) => {
 };
 
 // GET - Check droid CLI and read current settings
-export async function GET() {
+export async function GET(request: Request) {
+  const authError = await requireCliToolsAuth(request);
+  if (authError) return authError;
+
   try {
     const runtime = await getCliRuntimeStatus("droid");
 
@@ -77,6 +81,9 @@ export async function GET() {
 
 // POST - Update OmniRoute customModels (merge with existing settings)
 export async function POST(request: Request) {
+  const authError = await requireCliToolsAuth(request);
+  if (authError) return authError;
+
   let rawBody;
   try {
     rawBody = await request.json();
@@ -106,19 +113,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
     const { baseUrl, model } = validation.data;
-    let { apiKey } = validation.data;
-
-    // Resolve real key from DB by ID
-    if (keyId) {
-      try {
-        const keyRecord = await getApiKeyById(keyId);
-        if (keyRecord?.key) {
-          apiKey = keyRecord.key as string;
-        }
-      } catch {
-        // Non-critical: fall back to whatever value was in apiKey
-      }
-    }
+    const apiKey = await resolveApiKey(keyId, validation.data.apiKey);
 
     const droidDir = getDroidDir();
     const settingsPath = getDroidSettingsPath();
@@ -186,7 +181,10 @@ export async function POST(request: Request) {
 }
 
 // DELETE - Remove OmniRoute customModels only (keep other settings)
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  const authError = await requireCliToolsAuth(request);
+  if (authError) return authError;
+
   try {
     const writeGuard = ensureCliConfigWriteAllowed();
     if (writeGuard) {

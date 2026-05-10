@@ -7,7 +7,7 @@ import {
   isAnthropicCompatibleProvider,
 } from "@/shared/constants/providers";
 import { validateProviderApiKey } from "@/lib/providers/validation";
-import { getProxyForLevel } from "@/lib/localDb";
+import { getProxyForLevel, resolveProxyForProvider } from "@/lib/localDb";
 import { validateProviderApiKeySchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
@@ -51,6 +51,7 @@ export async function POST(request) {
       validationModelId,
       customUserAgent,
       baseUrl: bodyBaseUrl,
+      cx,
     } = validation.data;
 
     let providerSpecificData: any = { validationModelId };
@@ -59,6 +60,9 @@ export async function POST(request) {
     }
     if (bodyBaseUrl) {
       providerSpecificData.baseUrl = bodyBaseUrl;
+    }
+    if (cx) {
+      providerSpecificData.cx = cx;
     }
 
     if (isOpenAICompatibleProvider(provider) || isAnthropicCompatibleProvider(provider)) {
@@ -83,10 +87,16 @@ export async function POST(request) {
       };
     }
 
-    const providerProxy = await getProxyForLevel("provider", provider);
-    const globalProxy = providerProxy ? null : await getProxyForLevel("global");
+    const registryProxy = await resolveProxyForProvider(provider);
+    let proxyToUse = registryProxy;
 
-    const result = await runWithProxyContext(providerProxy || globalProxy || null, () =>
+    if (!proxyToUse) {
+      const providerProxy = await getProxyForLevel("provider", provider);
+      const globalProxy = providerProxy ? null : await getProxyForLevel("global");
+      proxyToUse = providerProxy || globalProxy || null;
+    }
+
+    const result = await runWithProxyContext(proxyToUse || null, () =>
       validateProviderApiKey({
         provider,
         apiKey,

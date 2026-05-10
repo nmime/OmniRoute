@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { Card, Button, Badge, Modal, Input, ModelSelectModal } from "@/shared/components";
-import Image from "next/image";
 import { useTranslations } from "next-intl";
+
+import ProviderIcon from "@/shared/components/ProviderIcon";
 
 export default function AntigravityToolCard({
   tool,
@@ -20,17 +21,19 @@ export default function AntigravityToolCard({
   const [loading, setLoading] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [sudoPassword, setSudoPassword] = useState("");
-  const [selectedApiKey, setSelectedApiKey] = useState("");
+  const [selectedApiKeyId, setSelectedApiKeyId] = useState("");
   const [message, setMessage] = useState(null);
   const [modelMappings, setModelMappings] = useState({});
   const [modalOpen, setModalOpen] = useState(false);
   const [currentEditingAlias, setCurrentEditingAlias] = useState(null);
 
+  // (#523) Store the key *id* (not the masked string) so the backend can
+  // resolve the real secret from DB before writing to config files.
   useEffect(() => {
-    if (apiKeys?.length > 0 && !selectedApiKey) {
-      setSelectedApiKey(apiKeys[0].key);
+    if (apiKeys?.length > 0 && !selectedApiKeyId) {
+      setSelectedApiKeyId(apiKeys[0].id);
     }
-  }, [apiKeys, selectedApiKey]);
+  }, [apiKeys, selectedApiKeyId]);
 
   useEffect(() => {
     if (isExpanded && !status) {
@@ -93,15 +96,18 @@ export default function AntigravityToolCard({
     setLoading(true);
     setMessage(null);
     try {
-      const keyToUse =
-        selectedApiKey?.trim() ||
-        (apiKeys?.length > 0 ? apiKeys[0].key : null) ||
-        (!cloudEnabled ? "sk_omniroute" : null);
+      // (#523) Prefer keyId lookup so the backend writes the real key to disk.
+      const selectedKeyId =
+        selectedApiKeyId?.trim() || (apiKeys?.length > 0 ? apiKeys[0].id : null);
 
       const res = await fetch("/api/cli-tools/antigravity-mitm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: keyToUse, sudoPassword: password }),
+        body: JSON.stringify({
+          apiKey: !cloudEnabled ? "sk_omniroute" : null,
+          keyId: selectedKeyId,
+          sudoPassword: password,
+        }),
       });
 
       const data = await res.json();
@@ -111,7 +117,11 @@ export default function AntigravityToolCard({
         setSudoPassword("");
         fetchStatus();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedStart") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) || t("failedStart"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -137,7 +147,11 @@ export default function AntigravityToolCard({
         setSudoPassword("");
         fetchStatus();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedStop") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) || t("failedStop"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -192,7 +206,10 @@ export default function AntigravityToolCard({
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || t("failedSaveMappings"));
+        throw new Error(
+          (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedSaveMappings")
+        );
       }
 
       setMessage({ type: "success", text: t("mappingsSaved") });
@@ -210,17 +227,7 @@ export default function AntigravityToolCard({
       <div className="flex items-center justify-between hover:cursor-pointer" onClick={onToggle}>
         <div className="flex items-center gap-3">
           <div className="size-8 flex items-center justify-center shrink-0">
-            <Image
-              src={tool.image || "/providers/antigravity.png"}
-              alt={tool.name}
-              width={32}
-              height={32}
-              className="size-8 object-contain rounded-lg"
-              sizes="32px"
-              onError={(e) => {
-                (e.currentTarget as HTMLElement).style.display = "none";
-              }}
-            />
+            <ProviderIcon providerId={tool.id || "antigravity"} size={32} type="color" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -289,12 +296,12 @@ export default function AntigravityToolCard({
                 </span>
                 {apiKeys.length > 0 ? (
                   <select
-                    value={selectedApiKey}
-                    onChange={(e) => setSelectedApiKey(e.target.value)}
+                    value={selectedApiKeyId}
+                    onChange={(e) => setSelectedApiKeyId(e.target.value)}
                     className="flex-1 px-2 py-1.5 bg-surface rounded text-xs border border-border focus:outline-none focus:ring-1 focus:ring-primary/50"
                   >
                     {apiKeys.map((key) => (
-                      <option key={key.id} value={key.key}>
+                      <option key={key.id} value={key.id}>
                         {key.key}
                       </option>
                     ))}

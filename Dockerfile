@@ -1,4 +1,4 @@
-FROM node:22.22.2-trixie-slim AS builder
+FROM node:24.15.0-trixie-slim AS builder
 WORKDIR /app
 
 RUN apt-get update \
@@ -7,13 +7,19 @@ RUN apt-get update \
 
 COPY package*.json ./
 COPY scripts/postinstall.mjs ./scripts/postinstall.mjs
+COPY scripts/postinstallSupport.mjs ./scripts/postinstallSupport.mjs
 COPY scripts/native-binary-compat.mjs ./scripts/native-binary-compat.mjs
-RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+ENV NPM_CONFIG_LEGACY_PEER_DEPS=true
+RUN if [ -f package-lock.json ]; then \
+    npm ci --no-audit --no-fund --legacy-peer-deps; \
+    else \
+    npm install --no-audit --no-fund --legacy-peer-deps; \
+    fi
 
 COPY . ./
 RUN mkdir -p /app/data && npm run build -- --webpack
 
-FROM node:22.22.2-trixie-slim AS runner-base
+FROM node:24.15.0-trixie-slim AS runner-base
 WORKDIR /app
 
 LABEL org.opencontainers.image.title="omniroute" \
@@ -44,6 +50,16 @@ COPY --from=builder /app/node_modules/@swc/helpers ./node_modules/@swc/helpers
 COPY --from=builder /app/node_modules/pino-abstract-transport ./node_modules/pino-abstract-transport
 COPY --from=builder /app/node_modules/pino-pretty ./node_modules/pino-pretty
 COPY --from=builder /app/node_modules/split2 ./node_modules/split2
+# Migration SQL files are read via fs.readFileSync at runtime and are NOT
+# traced by Next.js standalone output — copy them explicitly.
+COPY --from=builder /app/src/lib/db/migrations ./migrations
+ENV OMNIROUTE_MIGRATIONS_DIR=/app/migrations
+# MITM server.cjs is spawned at runtime via child_process — not traced by nft
+COPY --from=builder /app/src/mitm/server.cjs ./src/mitm/server.cjs
+# OpenAPI spec is read from disk by /api/openapi/spec at runtime for the
+# Endpoints dashboard. Next.js standalone tracing does not include it.
+COPY --from=builder /app/docs/openapi.yaml ./docs/openapi.yaml
+
 COPY --from=builder /app/scripts/run-standalone.mjs ./run-standalone.mjs
 COPY --from=builder /app/scripts/runtime-env.mjs ./runtime-env.mjs
 COPY --from=builder /app/scripts/bootstrap-env.mjs ./bootstrap-env.mjs

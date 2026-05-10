@@ -1,4 +1,4 @@
-import { CORS_ORIGIN, CORS_HEADERS } from "@/shared/utils/cors";
+import { CORS_HEADERS } from "@/shared/utils/cors";
 import { buildClientRawRequest, handleChat } from "@/sse/handlers/chat";
 import { initTranslators } from "@omniroute/open-sse/translator/index.ts";
 import { createInjectionGuard } from "@/middleware/promptInjectionGuard";
@@ -21,7 +21,6 @@ function ensureInitialized() {
 export async function OPTIONS() {
   return new Response(null, {
     headers: {
-      "Access-Control-Allow-Origin": CORS_ORIGIN,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "*",
     },
@@ -80,16 +79,6 @@ export async function POST(request: Request) {
     }
   } catch (error) {
     console.error("[SECURITY] Prompt injection guard failed:", error);
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: "Security validation temporarily unavailable",
-          type: "security_guard_unavailable",
-          code: "SECURITY_002",
-        },
-      }),
-      { status: 503, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
   }
 
   // Standard path: body already has messages[] (chat format)

@@ -5,14 +5,22 @@ const usageService = await import("../../open-sse/services/usage.ts");
 const { __testing } = usageService;
 
 const originalFetch = globalThis.fetch;
+const originalCreditsMode = process.env.ANTIGRAVITY_CREDITS;
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalCreditsMode === undefined) {
+    delete process.env.ANTIGRAVITY_CREDITS;
+  } else {
+    process.env.ANTIGRAVITY_CREDITS = originalCreditsMode;
+  }
 });
 
 test("usage service covers GitHub free-plan parsing, auth denial and unsupported providers", async () => {
-  globalThis.fetch = async () =>
-    new Response(
+  const calls: any[] = [];
+  globalThis.fetch = async (_url, init = {}) => {
+    calls.push(init);
+    return new Response(
       JSON.stringify({
         copilot_plan: "free",
         limited_user_reset_date: new Date(Date.now() + 60_000).toISOString(),
@@ -29,8 +37,9 @@ test("usage service covers GitHub free-plan parsing, auth denial and unsupported
       }),
       { status: 200 }
     );
+  };
 
-  const freeUsage = await usageService.getUsageForProvider({
+  const freeUsage: any = await usageService.getUsageForProvider({
     provider: "github",
     accessToken: "gho-free",
   });
@@ -40,15 +49,20 @@ test("usage service covers GitHub free-plan parsing, auth denial and unsupported
   assert.equal(freeUsage.quotas.premium_interactions.used, 50);
   assert.equal(freeUsage.quotas.chat.remaining, 20);
   assert.equal(freeUsage.quotas.completions.remainingPercentage, 80);
+  assert.equal(calls[0].headers.Authorization, "token gho-free");
+  assert.equal(calls[0].headers["User-Agent"], "GitHubCopilotChat/0.45.1");
+  assert.equal(calls[0].headers["Editor-Version"], "vscode/1.117.0");
+  assert.equal(calls[0].headers["Editor-Plugin-Version"], "copilot-chat/0.45.1");
+  assert.equal(calls[0].headers["X-GitHub-Api-Version"], "2025-04-01");
 
   globalThis.fetch = async () => new Response("forbidden", { status: 403 });
-  const forbidden = await usageService.getUsageForProvider({
+  const forbidden: any = await usageService.getUsageForProvider({
     provider: "github",
     accessToken: "gho-expired",
   });
   assert.match(forbidden.message, /re-authenticate/i);
 
-  const unsupported = await usageService.getUsageForProvider({
+  const unsupported: any = await usageService.getUsageForProvider({
     provider: "unknown-provider",
     accessToken: "token",
   });
@@ -79,7 +93,7 @@ test("usage service covers GitHub paid snapshot edge cases, missing quota payloa
       { status: 200 }
     );
 
-  const paidUsage = await usageService.getUsageForProvider({
+  const paidUsage: any = await usageService.getUsageForProvider({
     provider: "github",
     accessToken: "gho-paid",
   });
@@ -91,7 +105,7 @@ test("usage service covers GitHub paid snapshot edge cases, missing quota payloa
 
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ access_type_sku: "odd_tier" }), { status: 200 });
-  const missingQuotaPayload = await usageService.getUsageForProvider({
+  const missingQuotaPayload: any = await usageService.getUsageForProvider({
     provider: "github",
     accessToken: "gho-odd",
   });
@@ -118,7 +132,7 @@ test("usage service covers GitHub paid snapshot edge cases, missing quota payloa
 });
 
 test("usage service covers Gemini CLI access-token checks, cached subscription lookup and quota failures", async () => {
-  const calls = [];
+  const calls: any[] = [];
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
 
@@ -153,17 +167,17 @@ test("usage service covers Gemini CLI access-token checks, cached subscription l
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const noToken = await usageService.getUsageForProvider({
+  const noToken: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "",
   });
   assert.match(noToken.message, /not available/i);
 
-  const first = await usageService.getUsageForProvider({
+  const first: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-token-cache",
   });
-  const second = await usageService.getUsageForProvider({
+  const second: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-token-cache",
   });
@@ -184,7 +198,7 @@ test("usage service covers Gemini CLI access-token checks, cached subscription l
     return new Response(JSON.stringify({ error: "down" }), { status: 503 });
   };
 
-  const quotaFailure = await usageService.getUsageForProvider({
+  const quotaFailure: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-token-failure",
     providerSpecificData: { projectId: "project-999" },
@@ -202,7 +216,7 @@ test("usage service covers Gemini CLI tier-label fallbacks and fetch error handl
       { status: 200 }
     );
 
-  const enterprise = await usageService.getUsageForProvider({
+  const enterprise: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-enterprise",
   });
@@ -216,7 +230,7 @@ test("usage service covers Gemini CLI tier-label fallbacks and fetch error handl
       }),
       { status: 200 }
     );
-  const ultra = await usageService.getUsageForProvider({
+  const ultra: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-ultra",
   });
@@ -229,7 +243,7 @@ test("usage service covers Gemini CLI tier-label fallbacks and fetch error handl
       }),
       { status: 200 }
     );
-  const customTier = await usageService.getUsageForProvider({
+  const customTier: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-custom-tier",
   });
@@ -239,10 +253,10 @@ test("usage service covers Gemini CLI tier-label fallbacks and fetch error handl
     if (String(_url).includes("loadCodeAssist")) {
       return new Response(JSON.stringify({ currentTier: { id: "tier_pro" } }), { status: 200 });
     }
-    assert.ok(String(init.body).includes("project-throw"));
+    assert.ok(String((init as any).body).includes("project-throw"));
     throw new Error("quota endpoint offline");
   };
-  const fetchError = await usageService.getUsageForProvider({
+  const fetchError: any = await usageService.getUsageForProvider({
     provider: "gemini-cli",
     accessToken: "gem-throw",
     providerSpecificData: { projectId: "project-throw" },
@@ -251,7 +265,7 @@ test("usage service covers Gemini CLI tier-label fallbacks and fetch error handl
 });
 
 test("usage service covers Antigravity quota parsing, exclusions and forbidden access", async () => {
-  const calls = [];
+  const calls: any[] = [];
 
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
@@ -282,7 +296,7 @@ test("usage service covers Antigravity quota parsing, exclusions and forbidden a
             "gemini-unlimited": {
               quotaInfo: {},
             },
-            "gemini-open": {
+            "gemini-3.1-pro-high": {
               quotaInfo: { remainingFraction: 1 },
             },
             "internal-model": {
@@ -298,30 +312,24 @@ test("usage service covers Antigravity quota parsing, exclusions and forbidden a
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const usage = await usageService.getUsageForProvider({
+  const usage: any = await usageService.getUsageForProvider({
     provider: "antigravity",
     accessToken: "ag-token",
   });
 
   assert.equal(usage.plan, "Ultra");
-  assert.deepEqual(Object.keys(usage.quotas).sort(), ["claude-sonnet-4-6", "gemini-open"]);
+  assert.deepEqual(Object.keys(usage.quotas).sort(), ["claude-sonnet-4-6", "gemini-3.1-pro-high"]);
   assert.equal(usage.quotas["claude-sonnet-4-6"].used, 600);
-  assert.equal(usage.quotas["gemini-open"].total, 0);
-  assert.equal(usage.quotas["gemini-open"].remainingPercentage, 100);
+  assert.equal(usage.quotas["gemini-3.1-pro-high"].total, 0);
+  assert.equal(usage.quotas["gemini-3.1-pro-high"].remainingPercentage, 100);
   const loadCodeAssistCall = calls.find((call) => call.url.includes("loadCodeAssist"));
-  assert.equal(loadCodeAssistCall?.init.headers["User-Agent"], "google-api-nodejs-client/9.15.1");
-  assert.equal(
-    loadCodeAssistCall?.init.headers["X-Goog-Api-Client"],
-    "google-cloud-sdk vscode_cloudshelleditor/0.1"
-  );
-  assert.equal(
-    loadCodeAssistCall?.init.headers["Client-Metadata"],
-    JSON.stringify({
-      ideType: "IDE_UNSPECIFIED",
-      platform: "PLATFORM_UNSPECIFIED",
-      pluginType: "GEMINI",
-    })
-  );
+  assert.match(loadCodeAssistCall?.url, /daily-cloudcode-pa\.sandbox\.googleapis\.com/);
+  assert.match(loadCodeAssistCall?.init.headers["User-Agent"], /^vscode\/1\.X\.X \(Antigravity\//);
+  assert.equal(loadCodeAssistCall?.init.headers["X-Goog-Api-Client"], undefined);
+  assert.equal(loadCodeAssistCall?.init.headers["Client-Metadata"], undefined);
+  assert.deepEqual(JSON.parse(loadCodeAssistCall?.init.body).metadata, {
+    ideType: "ANTIGRAVITY",
+  });
 
   globalThis.fetch = async (url) => {
     if (String(url).includes("loadCodeAssist")) {
@@ -330,7 +338,7 @@ test("usage service covers Antigravity quota parsing, exclusions and forbidden a
     return new Response("forbidden", { status: 403 });
   };
 
-  const forbidden = await usageService.getUsageForProvider({
+  const forbidden: any = await usageService.getUsageForProvider({
     provider: "antigravity",
     accessToken: "ag-forbidden",
   });
@@ -338,7 +346,7 @@ test("usage service covers Antigravity quota parsing, exclusions and forbidden a
 });
 
 test("usage service retries Antigravity fetchAvailableModels across the shared fallback order", async () => {
-  const calls = [];
+  const calls: any[] = [];
 
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
@@ -353,8 +361,16 @@ test("usage service retries Antigravity fetchAvailableModels across the shared f
       );
     }
 
-    if (String(url).includes("daily-cloudcode-pa.googleapis.com")) {
-      return new Response("bad gateway", { status: 502 });
+    try {
+      const parsedUrl = new URL(String(url));
+      if (parsedUrl.hostname === "daily-cloudcode-pa.sandbox.googleapis.com") {
+        return new Response("bad gateway", { status: 502 });
+      }
+      if (parsedUrl.hostname === "daily-cloudcode-pa.googleapis.com") {
+        return new Response("bad gateway", { status: 502 });
+      }
+    } catch {
+      // Ignore invalid URLs
     }
 
     return new Response(
@@ -372,7 +388,7 @@ test("usage service retries Antigravity fetchAvailableModels across the shared f
     );
   };
 
-  const usage = await usageService.getUsageForProvider({
+  const usage: any = await usageService.getUsageForProvider({
     provider: "antigravity",
     accessToken: "ag-fallback",
   });
@@ -381,13 +397,84 @@ test("usage service retries Antigravity fetchAvailableModels across the shared f
   assert.deepEqual(
     quotaCalls.map((call) => call.url),
     [
-      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
       "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels",
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+      "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
     ]
   );
-  assert.match(quotaCalls[1].init.headers["User-Agent"], /^antigravity\//);
+  assert.match(quotaCalls[2].init.headers["User-Agent"], /^Antigravity\//);
   assert.equal(usage.plan, "Business");
   assert.equal(usage.quotas["claude-sonnet-4-6"].used, 500);
+});
+
+test("usage service manual Antigravity refresh bypasses usage TTL caches", async () => {
+  process.env.ANTIGRAVITY_CREDITS = "retry";
+  let probeCalls = 0;
+  let modelCalls = 0;
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("loadCodeAssist")) {
+      return new Response(JSON.stringify({ cloudaicompanionProject: "ag-project" }), {
+        status: 200,
+      });
+    }
+
+    if (urlStr.includes("streamGenerateContent")) {
+      probeCalls++;
+      return new Response(
+        `data: ${JSON.stringify({ remainingCredits: [{ creditType: "GOOGLE_ONE_AI", creditAmount: String(100 - probeCalls) }] })}\n\n`,
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+
+    if (urlStr.includes("fetchAvailableModels")) {
+      modelCalls++;
+      return new Response(
+        JSON.stringify({
+          models: {
+            "claude-sonnet-4-6": {
+              quotaInfo: { remainingFraction: 1 },
+            },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  const connection = {
+    id: "ag-manual-refresh-service-test",
+    provider: "antigravity",
+    accessToken: "ag-manual-service-token",
+    projectId: "ag-project",
+  };
+
+  await usageService.getUsageForProvider(connection, { forceRefresh: true });
+  await usageService.getUsageForProvider(connection, { forceRefresh: true });
+
+  assert.equal(probeCalls, 2);
+  assert.equal(modelCalls, 2);
+});
+
+test("usage service handles missing Antigravity access tokens without probing upstream", async () => {
+  let fetchCalls = 0;
+
+  globalThis.fetch = async () => {
+    fetchCalls++;
+    return new Response("unexpected", { status: 500 });
+  };
+
+  const usage: any = await usageService.getUsageForProvider({
+    provider: "antigravity",
+    accessToken: undefined,
+  });
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(usage.plan, "Free");
+  assert.match(usage.message, /Antigravity access token not available/i);
 });
 
 test("usage service covers Antigravity tier fallbacks and non-403 upstream failures", async () => {
@@ -403,7 +490,7 @@ test("usage service covers Antigravity tier fallbacks and non-403 upstream failu
     return new Response("upstream failed", { status: 500 });
   };
 
-  const failedUsage = await usageService.getUsageForProvider({
+  const failedUsage: any = await usageService.getUsageForProvider({
     provider: "antigravity",
     accessToken: "ag-failed",
   });
@@ -430,7 +517,7 @@ test("usage service covers Claude OAuth success, legacy fallback and permissions
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const oauthUsage = await usageService.getUsageForProvider({
+  const oauthUsage: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-oauth",
   });
@@ -460,7 +547,7 @@ test("usage service covers Claude OAuth success, legacy fallback and permissions
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const legacyUsage = await usageService.getUsageForProvider({
+  const legacyUsage: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-legacy",
   });
@@ -475,7 +562,7 @@ test("usage service covers Claude OAuth success, legacy fallback and permissions
     return new Response("denied", { status: 403 });
   };
 
-  const permissionsMessage = await usageService.getUsageForProvider({
+  const permissionsMessage: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-denied",
   });
@@ -495,7 +582,7 @@ test("usage service covers Claude default-plan fallback, legacy org denial and f
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const defaultPlan = await usageService.getUsageForProvider({
+  const defaultPlan: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-default",
   });
@@ -519,7 +606,7 @@ test("usage service covers Claude default-plan fallback, legacy org denial and f
     return new Response("forbidden", { status: 403 });
   };
 
-  const orgDenied = await usageService.getUsageForProvider({
+  const orgDenied: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-org-denied",
   });
@@ -529,7 +616,7 @@ test("usage service covers Claude default-plan fallback, legacy org denial and f
   globalThis.fetch = async () => {
     throw new Error("claude usage offline");
   };
-  const fetchFailure = await usageService.getUsageForProvider({
+  const fetchFailure: any = await usageService.getUsageForProvider({
     provider: "claude",
     accessToken: "claude-offline",
   });
@@ -539,7 +626,7 @@ test("usage service covers Claude default-plan fallback, legacy org denial and f
 test("usage service covers Codex, Kiro and Kimi usage parsing and error branches", async () => {
   globalThis.fetch = async (url, init = {}) => {
     if (String(url).includes("/backend-api/wham/usage")) {
-      assert.equal(init.headers["chatgpt-account-id"], "workspace-123");
+      assert.equal((init as any).headers["chatgpt-account-id"], "workspace-123");
       return new Response(
         JSON.stringify({
           plan_type: "plus",
@@ -618,7 +705,7 @@ test("usage service covers Codex, Kiro and Kimi usage parsing and error branches
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const codex = await usageService.getUsageForProvider({
+  const codex: any = await usageService.getUsageForProvider({
     provider: "codex",
     accessToken: "codex-token",
     providerSpecificData: { workspaceId: "workspace-123" },
@@ -628,14 +715,14 @@ test("usage service covers Codex, Kiro and Kimi usage parsing and error branches
   assert.equal(codex.quotas.weekly.remaining, 50);
   assert.equal(codex.quotas.code_review.remaining, 60);
 
-  const kiroNoArn = await usageService.getUsageForProvider({
+  const kiroNoArn: any = await usageService.getUsageForProvider({
     provider: "kiro",
     accessToken: "kiro-token",
     providerSpecificData: {},
   });
   assert.match(kiroNoArn.message, /Profile ARN not available/i);
 
-  const kiro = await usageService.getUsageForProvider({
+  const kiro: any = await usageService.getUsageForProvider({
     provider: "kiro",
     accessToken: "kiro-token",
     providerSpecificData: { profileArn: "arn:test:kiro" },
@@ -644,7 +731,16 @@ test("usage service covers Codex, Kiro and Kimi usage parsing and error branches
   assert.equal(kiro.quotas.agentic_request.used, 12);
   assert.equal(kiro.quotas.agentic_request_freetrial.remaining, 3);
 
-  const kimi = await usageService.getUsageForProvider({
+  const amazonQ: any = await usageService.getUsageForProvider({
+    provider: "amazon-q",
+    accessToken: "amazon-q-token",
+    providerSpecificData: { profileArn: "arn:test:amazon-q" },
+  });
+  assert.equal(amazonQ.plan, "Kiro Pro");
+  assert.equal(amazonQ.quotas.agentic_request.used, 12);
+  assert.equal(amazonQ.quotas.agentic_request_freetrial.remaining, 3);
+
+  const kimi: any = await usageService.getUsageForProvider({
     provider: "kimi-coding",
     accessToken: "kimi-token",
   });
@@ -660,7 +756,7 @@ test("usage service covers Codex, Kiro and Kimi usage parsing and error branches
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const kimiError = await usageService.getUsageForProvider({
+  const kimiError: any = await usageService.getUsageForProvider({
     provider: "kimi-coding",
     accessToken: "kimi-error",
   });
@@ -673,7 +769,7 @@ test("usage service covers Codex, Kiro and Kimi usage parsing and error branches
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const kimiInvalidJson = await usageService.getUsageForProvider({
+  const kimiInvalidJson: any = await usageService.getUsageForProvider({
     provider: "kimi-coding",
     accessToken: "kimi-invalid-json",
   });
@@ -687,7 +783,7 @@ test("usage service covers Codex auth failures, Kiro hard failures, Kimi no-quot
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const codexDenied = await usageService.getUsageForProvider({
+  const codexDenied: any = await usageService.getUsageForProvider({
     provider: "codex",
     accessToken: "codex-denied",
   });
@@ -699,7 +795,7 @@ test("usage service covers Codex auth failures, Kiro hard failures, Kimi no-quot
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const codexBroken = await usageService.getUsageForProvider({
+  const codexBroken: any = await usageService.getUsageForProvider({
     provider: "codex",
     accessToken: "codex-broken",
   });
@@ -732,7 +828,7 @@ test("usage service covers Codex auth failures, Kiro hard failures, Kimi no-quot
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const kimiNoQuota = await usageService.getUsageForProvider({
+  const kimiNoQuota: any = await usageService.getUsageForProvider({
     provider: "kimi-coding",
     accessToken: "kimi-no-quota",
   });
@@ -742,13 +838,13 @@ test("usage service covers Codex auth failures, Kiro hard failures, Kimi no-quot
   globalThis.fetch = async () => {
     throw new Error("kimi offline");
   };
-  const kimiOffline = await usageService.getUsageForProvider({
+  const kimiOffline: any = await usageService.getUsageForProvider({
     provider: "kimi-coding",
     accessToken: "kimi-offline",
   });
   assert.match(kimiOffline.message, /Unable to fetch usage: kimi offline/i);
 
-  const qwenCatch = await usageService.getUsageForProvider({
+  const qwenCatch: any = await usageService.getUsageForProvider({
     provider: "qwen",
     accessToken: "qwen-catch",
     providerSpecificData: {
@@ -760,39 +856,70 @@ test("usage service covers Codex auth failures, Kiro hard failures, Kimi no-quot
   assert.equal(qwenCatch.message, "Unable to fetch Qwen usage.");
 });
 
-test("usage service covers Qwen, Qoder, GLM and GLMT branches", async () => {
-  const qwenMissingUrl = await usageService.getUsageForProvider({
+test("usage service covers Qwen, Qoder, GLM, Z.AI and GLMT branches", async () => {
+  const qwenMissingUrl: any = await usageService.getUsageForProvider({
     provider: "qwen",
     accessToken: "qwen-token",
     providerSpecificData: {},
   });
   assert.match(qwenMissingUrl.message, /No resource URL/i);
 
-  const qwen = await usageService.getUsageForProvider({
+  const qwen: any = await usageService.getUsageForProvider({
     provider: "qwen",
     accessToken: "qwen-token",
     providerSpecificData: { resourceUrl: "https://example.com/resource" },
   });
   assert.match(qwen.message, /Usage tracked per request/i);
 
-  const qoder = await usageService.getUsageForProvider({
+  const qoder: any = await usageService.getUsageForProvider({
     provider: "qoder",
     accessToken: "qoder-token",
   });
   assert.match(qoder.message, /Usage tracked per request/i);
 
+  const glmMissingKey: any = await usageService.getUsageForProvider({
+    provider: "glm",
+    apiKey: "",
+  });
+  assert.equal(
+    glmMissingKey.message,
+    "API key not available. Add a coding plan API key to view usage."
+  );
+
   globalThis.fetch = async (url, init = {}) => {
     if (String(url).includes("/api/monitor/usage/quota/limit")) {
-      assert.equal(init.headers.Authorization, "Bearer glm-key");
+      assert.equal((init as any).headers.Authorization, "Bearer glm-key");
       return new Response(
         JSON.stringify({
           data: {
             level: "pro",
             limits: [
               {
+                type: "TIME_LIMIT",
+                usage: 1000,
+                currentValue: 12,
+                remaining: 988,
+                percentage: "1.2",
+                nextResetTime: Date.now() + 30 * 24 * 60 * 60 * 1000,
+                usageDetails: [
+                  { modelCode: "search-prime", usage: 5 },
+                  { modelCode: "web-reader", usage: 7 },
+                  { modelCode: "zread", usage: 0 },
+                ],
+              },
+              {
                 type: "TOKENS_LIMIT",
+                unit: 3,
+                number: 5,
                 percentage: "64",
                 nextResetTime: Date.now() + 120_000,
+              },
+              {
+                type: "TOKENS_LIMIT",
+                unit: 4,
+                number: 7,
+                percentage: "25",
+                nextResetTime: Date.now() + 7 * 24 * 60 * 60 * 1000,
               },
               {
                 type: "OTHER_LIMIT",
@@ -808,7 +935,7 @@ test("usage service covers Qwen, Qoder, GLM and GLMT branches", async () => {
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const glm = await usageService.getUsageForProvider({
+  const glm: any = await usageService.getUsageForProvider({
     provider: "glm",
     apiKey: "glm-key",
     providerSpecificData: { apiRegion: "invalid-region" },
@@ -816,15 +943,48 @@ test("usage service covers Qwen, Qoder, GLM and GLMT branches", async () => {
   assert.equal(glm.plan, "Pro");
   assert.equal(glm.quotas.session.used, 64);
   assert.equal(glm.quotas.session.remaining, 36);
+  assert.equal(glm.quotas.weekly.used, 25);
+  assert.equal(glm.quotas.weekly.remaining, 75);
+  assert.equal(glm.quotas.mcp_monthly.used, 12);
+  assert.equal(glm.quotas.mcp_monthly.remaining, 988);
+  assert.equal(glm.quotas.mcp_monthly.remainingPercentage, 99);
+  assert.equal(glm.quotas.mcp_monthly.displayName, "Monthly");
+  assert.deepEqual(glm.quotas.mcp_monthly.details, [
+    { name: "search-prime", used: 5 },
+    { name: "web-reader", used: 7 },
+    { name: "zread", used: 0 },
+  ]);
 
-  const glmt = await usageService.getUsageForProvider({
+  const glmt: any = await usageService.getUsageForProvider({
     provider: "glmt",
     apiKey: "glm-key",
     providerSpecificData: { apiRegion: "international" },
   });
   assert.equal(glmt.plan, "Pro");
-  assert.equal(glmt.quotas.session.used, 64);
-  assert.equal(glmt.quotas.session.remaining, 36);
+  assert.equal(glmt.quotas["5 Hours Quota"].used, 15);
+  assert.equal(glmt.quotas["Weekly Quota"].remaining, 36);
+
+  let glmCnUrl = "";
+  globalThis.fetch = async (url) => {
+    glmCnUrl = String(url);
+    return new Response(
+      JSON.stringify({
+        data: {
+          planName: "Lite Plan",
+          limits: [{ type: "TOKENS_LIMIT", percentage: "64" }],
+        },
+      }),
+      { status: 200 }
+    );
+  };
+  const glmCn: any = await usageService.getUsageForProvider({
+    provider: "glm-cn",
+    apiKey: "glm-cn-key",
+    providerSpecificData: { apiRegion: "international" },
+  });
+  assert.match(glmCnUrl, /open\.bigmodel\.cn/);
+  assert.equal(glmCn.plan, "Lite");
+  assert.equal(glmCn.quotas.session.remaining, 36);
 
   globalThis.fetch = async () => new Response("nope", { status: 401 });
   await assert.rejects(
@@ -837,8 +997,130 @@ test("usage service covers Qwen, Qoder, GLM and GLMT branches", async () => {
   );
 });
 
+test("usage service covers MiniMax usage parsing, documented endpoint fallback and auth errors", async () => {
+  const calls: any[] = [];
+  const beforeCall = Date.now();
+
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+
+    if (String(url) === "https://www.minimax.io/v1/token_plan/remains") {
+      return new Response("missing", { status: 404 });
+    }
+
+    if (String(url) === "https://api.minimax.io/v1/api/openplatform/coding_plan/remains") {
+      assert.equal((init as any).headers.Authorization, "Bearer minimax-key");
+      assert.equal((init as any).headers.Accept, "application/json");
+
+      return new Response(
+        JSON.stringify({
+          base_resp: { status_code: 0, status_msg: "ok" },
+          model_remains: [
+            {
+              model_name: "MiniMax-M2.7",
+              remains_time: 300_000,
+              current_interval_total_count: 1500,
+              current_interval_usage_count: 1100,
+              current_weekly_total_count: 15000,
+              current_weekly_usage_count: 13800,
+              weekly_remains_time: 1_800_000,
+            },
+            {
+              model_name: "image-01",
+              remains_time: 86_400_000,
+              current_interval_total_count: 50,
+              current_interval_usage_count: 45,
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+
+    if (String(url) === "https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains") {
+      return new Response(
+        JSON.stringify({
+          base_resp: {
+            status_code: 1004,
+            status_msg: "token plan api key invalid",
+          },
+        }),
+        { status: 403 }
+      );
+    }
+
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  const usage: any = await usageService.getUsageForProvider({
+    provider: "minimax",
+    apiKey: "minimax-key",
+  });
+
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      "https://www.minimax.io/v1/token_plan/remains",
+      "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+    ]
+  );
+  assert.equal(usage.quotas["session (5h)"].used, 400);
+  assert.equal(usage.quotas["session (5h)"].total, 1500);
+  assert.equal(usage.quotas["session (5h)"].remaining, 1100);
+  assert.equal(usage.quotas["weekly (7d)"].used, 1200);
+  assert.equal(usage.quotas["weekly (7d)"].total, 15000);
+  assert.equal(usage.quotas["weekly (7d)"].remainingPercentage, 92);
+  assert.ok(Date.parse(usage.quotas["session (5h)"].resetAt) >= beforeCall + 240_000);
+
+  const invalid: any = await usageService.getUsageForProvider({
+    provider: "minimax-cn",
+    apiKey: "bad-minimax-key",
+  });
+  assert.match(invalid.message, /Token Plan API key/i);
+});
+
+test("usage service treats MiniMax token-plan counts as used usage", async () => {
+  const beforeCall = Date.now();
+
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(String(url), "https://www.minimax.io/v1/token_plan/remains");
+    assert.equal((init as any).headers.Authorization, "Bearer minimax-key");
+
+    return new Response(
+      JSON.stringify({
+        base_resp: { status_code: 0, status_msg: "ok" },
+        model_remains: [
+          {
+            model_name: "MiniMax-M2.7",
+            remains_time: 300_000,
+            current_interval_total_count: 15000,
+            current_interval_usage_count: 13,
+            current_weekly_total_count: 150000,
+            current_weekly_usage_count: 66,
+            weekly_remains_time: 604_800_000,
+          },
+        ],
+      }),
+      { status: 200 }
+    );
+  };
+
+  const usage: any = await usageService.getUsageForProvider({
+    provider: "minimax",
+    apiKey: "minimax-key",
+  });
+
+  assert.equal(usage.quotas["session (5h)"].used, 13);
+  assert.equal(usage.quotas["session (5h)"].remaining, 14987);
+  assert.equal(usage.quotas["session (5h)"].remainingPercentage, 99.91333333333333);
+  assert.equal(usage.quotas["weekly (7d)"].used, 66);
+  assert.equal(usage.quotas["weekly (7d)"].remaining, 149934);
+  assert.equal(usage.quotas["weekly (7d)"].remainingPercentage, 99.956);
+  assert.ok(Date.parse(usage.quotas["session (5h)"].resetAt) >= beforeCall + 240_000);
+});
+
 test("usage service parses Cursor team quotas and clamps on-demand ratio", async () => {
-  const calls = [];
+  const calls: any[] = [];
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
 
@@ -878,7 +1160,7 @@ test("usage service parses Cursor team quotas and clamps on-demand ratio", async
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  const usage = await usageService.getUsageForProvider({
+  const usage: any = await usageService.getUsageForProvider({
     provider: "cursor",
     accessToken: "cursor-token",
   });
@@ -886,8 +1168,8 @@ test("usage service parses Cursor team quotas and clamps on-demand ratio", async
   assert.equal(calls.length, 3);
   for (const call of calls) {
     assert.equal(call.init.headers.Authorization, "Bearer cursor-token");
-    assert.equal(call.init.headers["User-Agent"], "Cursor/3.1.0");
-    assert.equal(call.init.headers["x-cursor-client-version"], "3.1.0");
+    assert.equal(call.init.headers["User-Agent"], "Cursor/3.3");
+    assert.equal(call.init.headers["x-cursor-client-version"], "3.3");
   }
 
   assert.equal(usage.plan, "Cursor Team");
@@ -1001,9 +1283,9 @@ test("usage helper branches cover reset parsing, GitHub quota math, and plan inf
   assert.deepEqual(__testing.buildCursorUsageHeaders("cursor-token"), {
     Authorization: "Bearer cursor-token",
     Accept: "application/json",
-    "User-Agent": "Cursor/3.1.0",
-    "x-cursor-client-version": "3.1.0",
-    "x-cursor-user-agent": "Cursor/3.1.0",
+    "User-Agent": "Cursor/3.3",
+    "x-cursor-client-version": "3.3",
+    "x-cursor-user-agent": "Cursor/3.3",
   });
   assert.equal(
     __testing.getCursorMonthlyRequestLimit(
@@ -1083,4 +1365,96 @@ test("usage helper branches cover Gemini CLI and Antigravity plan label fallback
     }),
     "Custom sky"
   );
+});
+
+test("usage service covers NanoGPT PRO weekly token quota, FREE plan, auth denial and fetch failures", async () => {
+  const resetAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(String(url), "https://nano-gpt.com/api/subscription/v1/usage");
+    assert.equal((init as any).headers.Authorization, "Bearer nanogpt-pro-key");
+    return new Response(
+      JSON.stringify({
+        active: true,
+        limits: {
+          weeklyInputTokens: 60_000_000,
+          dailyInputTokens: null,
+          dailyImages: 100,
+        },
+        dailyInputTokens: null,
+        weeklyInputTokens: {
+          used: 31_157_321,
+          remaining: 28_842_679,
+          percentUsed: 0.5192886833333333,
+          resetAt,
+        },
+        dailyImages: {
+          used: 0,
+          remaining: 100,
+          percentUsed: 0,
+          resetAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+        state: "active",
+      }),
+      { status: 200 }
+    );
+  };
+
+  const proUsage: any = await usageService.getUsageForProvider({
+    provider: "nanogpt",
+    apiKey: "nanogpt-pro-key",
+  });
+
+  assert.equal(proUsage.plan, "PRO");
+  assert.ok(proUsage.quotas["Weekly Tokens"]);
+  assert.equal(proUsage.quotas["Weekly Tokens"].used, 31_157_321);
+  assert.equal(proUsage.quotas["Weekly Tokens"].total, 60_000_000);
+  assert.equal(proUsage.quotas["Weekly Tokens"].remaining, 28_842_679);
+  assert.ok(proUsage.quotas["Weekly Tokens"].remainingPercentage < 100);
+  assert.equal(proUsage.quotas["Weekly Tokens"].resetAt, new Date(resetAt).toISOString());
+  assert.equal(proUsage.quotas["Daily Images"].used, 0);
+  assert.equal(proUsage.quotas["Daily Images"].remaining, 100);
+  assert.equal(proUsage.quotas["Daily Images"].remainingPercentage, 100);
+
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(String(url), "https://nano-gpt.com/api/subscription/v1/usage");
+    assert.equal((init as any).headers.Authorization, "Bearer nanogpt-free-key");
+    return new Response(
+      JSON.stringify({
+        active: false,
+        limits: {},
+        state: "cancelled",
+      }),
+      { status: 200 }
+    );
+  };
+
+  const freeUsage: any = await usageService.getUsageForProvider({
+    provider: "nanogpt",
+    apiKey: "nanogpt-free-key",
+  });
+
+  assert.equal(freeUsage.plan, "FREE");
+  assert.deepEqual(freeUsage.quotas, {});
+
+  const noKey: any = await usageService.getUsageForProvider({
+    provider: "nanogpt",
+    apiKey: "",
+  });
+  assert.match(noKey.message, /NanoGPT API key not available/i);
+
+  globalThis.fetch = async () => new Response("unauthorized", { status: 401 });
+  const invalidKey: any = await usageService.getUsageForProvider({
+    provider: "nanogpt",
+    apiKey: "nanogpt-bad-key",
+  });
+  assert.match(invalidKey.message, /Invalid NanoGPT API key/i);
+
+  globalThis.fetch = async () => {
+    throw new Error("nano-gpt.com unreachable");
+  };
+  const fetchError: any = await usageService.getUsageForProvider({
+    provider: "nanogpt",
+    apiKey: "nanogpt-fail-key",
+  });
+  assert.match(fetchError.message, /Unable to fetch usage: nano-gpt.com unreachable/i);
 });

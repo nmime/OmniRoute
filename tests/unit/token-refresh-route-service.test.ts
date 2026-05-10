@@ -128,7 +128,7 @@ test("token refresh wrapper delegates provider-specific refresh helpers and form
       );
       const qwen = await tokenRefresh.refreshQwenToken("refresh-qwen");
       const codex = await tokenRefresh.refreshCodexToken("refresh-codex");
-      const qoder = await tokenRefresh.refreshIflowToken("refresh-qoder");
+      const qoder = await tokenRefresh.refreshQoderToken("refresh-qoder");
       const github = await tokenRefresh.refreshGitHubToken("refresh-github");
       const copilot = await tokenRefresh.refreshCopilotToken("github-access");
       const access = await tokenRefresh.getAccessToken("github", {
@@ -186,13 +186,13 @@ test("updateProviderCredentials persists rotated tokens and returns false for mi
     refreshToken: "refresh-old",
   });
 
-  const updated = await tokenRefresh.updateProviderCredentials(connection.id, {
+  const updated = await tokenRefresh.updateProviderCredentials((connection as any).id, {
     accessToken: "access-new",
     refreshToken: "refresh-new",
     expiresIn: 600,
     providerSpecificData: { tenant: "team-a" },
   });
-  const stored = await providersDb.getProviderConnectionById(connection.id);
+  const stored = await providersDb.getProviderConnectionById((connection as any).id);
   const missing = await tokenRefresh.updateProviderCredentials("missing", { accessToken: "nope" });
 
   assert.equal(updated, true);
@@ -200,6 +200,8 @@ test("updateProviderCredentials persists rotated tokens and returns false for mi
   assert.equal(stored.refreshToken, "refresh-new");
   assert.equal(stored.expiresIn, 600);
   assert.equal(typeof stored.expiresAt, "string");
+  assert.equal(typeof stored.tokenExpiresAt, "string");
+  assert.equal(stored.expiresAt, stored.tokenExpiresAt);
   assert.deepEqual(stored.providerSpecificData, { tenant: "team-a" });
   assert.equal(missing, false);
 });
@@ -230,7 +232,7 @@ test("checkAndRefreshToken refreshes expiring OAuth access tokens and updates th
           ...connection,
           connectionId: connection.id,
         });
-        const stored = await providersDb.getProviderConnectionById(connection.id);
+        const stored = await providersDb.getProviderConnectionById((connection as any).id);
 
         assert.equal(refreshed.accessToken, "claude-access-fresh");
         assert.equal(refreshed.refreshToken, "claude-refresh-fresh");
@@ -273,12 +275,12 @@ test("checkAndRefreshToken refreshes expiring GitHub copilot tokens and syncs th
           ...connection,
           connectionId: connection.id,
         });
-        const stored = await providersDb.getProviderConnectionById(connection.id);
+        const stored = await providersDb.getProviderConnectionById((connection as any).id);
 
         assert.equal(refreshed.copilotToken, "copilot-fresh");
         assert.equal(refreshed.providerSpecificData.copilotToken, "copilot-fresh");
-        assert.equal(stored.providerSpecificData.copilotToken, "copilot-fresh");
-        assert.equal(stored.providerSpecificData.copilotTokenExpiresAt, 1_700_001_000);
+        assert.equal((stored as any).providerSpecificData.copilotToken, "copilot-fresh");
+        assert.equal((stored as any).providerSpecificData.copilotTokenExpiresAt, 1_700_001_000);
       }
     );
   });

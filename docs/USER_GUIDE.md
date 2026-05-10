@@ -36,6 +36,7 @@ Complete guide for configuring providers, creating combos, integrating CLI tools
 |                     | Cerebras          | Pay per use | None             | Wafer-scale speed    |
 |                     | Cohere            | Pay per use | None             | Command R+ RAG       |
 |                     | NVIDIA NIM        | Pay per use | None             | Enterprise models    |
+|                     | Baidu Qianfan     | Pay per use | None             | ERNIE models         |
 | **💰 CHEAP**        | GLM-4.7           | $0.6/1M     | Daily 10AM       | Budget backup        |
 |                     | MiniMax M2.1      | $0.2/1M     | 5-hour rolling   | Cheapest option      |
 |                     | Kimi K2           | $9/mo flat  | 10M tokens/mo    | Predictable cost     |
@@ -55,7 +56,7 @@ Complete guide for configuring providers, creating combos, integrating CLI tools
 
 ```
 Combo: "maximize-claude"
-  1. cc/claude-opus-4-6        (use subscription fully)
+  1. cc/claude-opus-4-7        (use subscription fully)
   2. glm/glm-4.7               (cheap backup when quota out)
   3. if/kimi-k2-thinking       (free emergency fallback)
 
@@ -83,8 +84,8 @@ Quality: Production-ready models
 
 ```
 Combo: "always-on"
-  1. cc/claude-opus-4-6        (best quality)
-  2. cx/gpt-5.2-codex          (second subscription)
+  1. cc/claude-opus-4-7        (best quality)
+  2. cx/gpt-5.5                (second subscription)
   3. glm/glm-4.7               (cheap, resets daily)
   4. minimax/MiniMax-M2.1      (cheapest, 5h reset)
   5. if/kimi-k2-thinking       (free unlimited)
@@ -121,8 +122,8 @@ Dashboard → Providers → Connect Claude Code
 → 5-hour + weekly quota tracking
 
 Models:
-  cc/claude-opus-4-6
-  cc/claude-sonnet-4-5-20250929
+  cc/claude-opus-4-7
+  cc/claude-sonnet-4-6
   cc/claude-haiku-4-5-20251001
 ```
 
@@ -136,8 +137,8 @@ Dashboard → Providers → Connect Codex
 → 5-hour + weekly reset
 
 Models:
-  cx/gpt-5.2-codex
-  cx/gpt-5.1-codex-max
+  cx/gpt-5-5
+  cx/gpt-5-3-codex-spark
 ```
 
 #### Gemini CLI (FREE 180K/month!)
@@ -148,8 +149,8 @@ Dashboard → Providers → Connect Gemini CLI
 → 180K completions/month + 1K/day
 
 Models:
-  gc/gemini-3-flash-preview
-  gc/gemini-2.5-pro
+  gc/gemini-3-flash
+  gc/gemini-3.1-flash-lite-preview
 ```
 
 **Best Value:** Huge free tier! Use this before paid tiers.
@@ -162,8 +163,8 @@ Dashboard → Providers → Connect GitHub
 → Monthly reset (1st of month)
 
 Models:
-  gh/gpt-5
-  gh/claude-4.5-sonnet
+  gh/gpt-5.4
+  gh/claude-4.6-sonnet
   gh/gemini-3.1-pro-preview
 ```
 
@@ -171,7 +172,7 @@ Models:
 
 #### GLM-4.7 (Daily reset, $0.6/1M)
 
-1. Sign up: [Zhipu AI](https://open.bigmodel.cn/)
+1. Sign up: [Zhipu AI](https://open.bigmodel.cn)
 2. Get API key from Coding Plan
 3. Dashboard → Add API Key: Provider: `glm`, API Key: `your-key`
 
@@ -179,17 +180,24 @@ Models:
 
 #### MiniMax M2.1 (5h reset, $0.20/1M)
 
-1. Sign up: [MiniMax](https://www.minimax.io/)
+1. Sign up: [MiniMax](https://www.minimax.io)
 2. Get API key → Dashboard → Add API Key
 
 **Use:** `minimax/MiniMax-M2.1` — **Pro Tip:** Cheapest option for long context (1M tokens)!
 
 #### Kimi K2 ($9/month flat)
 
-1. Subscribe: [Moonshot AI](https://platform.moonshot.ai/)
+1. Subscribe: [Moonshot AI](https://platform.moonshot.ai)
 2. Get API key → Dashboard → Add API Key
 
-**Use:** `kimi/kimi-latest` — **Pro Tip:** Fixed $9/month for 10M tokens = $0.90/1M effective cost!
+**Use:** `kimi/kimi-k2.5` — **Pro Tip:** Fixed $9/month for 10M tokens = $0.90/1M effective cost!
+
+#### Baidu Qianfan / ERNIE
+
+1. Sign up: [Baidu AI Cloud Qianfan](https://cloud.baidu.com/product/wenxinworkshop)
+2. Create a Qianfan API key → Dashboard → Add API Key: Provider: `qianfan`
+
+**Use:** `qianfan/ernie-5.1`, `qianfan/ernie-x1.1`, or another Qianfan OpenAI-compatible model ID.
 
 ### 🆓 FREE Providers
 
@@ -199,14 +207,6 @@ Models:
 Dashboard → Connect Qoder → OAuth login → Unlimited usage
 
 Models: if/kimi-k2-thinking, if/qwen3-coder-plus, if/glm-4.7, if/minimax-m2, if/deepseek-r1
-```
-
-#### Qwen (3 FREE models)
-
-```bash
-Dashboard → Connect Qwen → Device code auth → Unlimited usage
-
-Models: qw/qwen3-coder-plus, qw/qwen3-coder-flash
 ```
 
 #### Kiro (Claude FREE)
@@ -230,9 +230,9 @@ Dashboard → Combos → Create New
 
 Name: premium-coding
 Models:
-  1. cc/claude-opus-4-6 (Subscription primary)
+  1. cc/claude-opus-4-7 (Subscription primary)
   2. glm/glm-4.7 (Cheap backup, $0.6/1M)
-  3. minimax/MiniMax-M2.1 (Cheapest fallback, $0.20/1M)
+  3. minimax/MiniMax-M2.7 (Cheapest fallback, $0.3/1M)
 
 Use in CLI: premium-coding
 ```
@@ -259,19 +259,23 @@ Cost: $0 forever!
 Settings → Models → Advanced:
   OpenAI API Base URL: http://localhost:20128/v1
   OpenAI API Key: [from omniroute dashboard]
-  Model: cc/claude-opus-4-6
+  Model: cc/claude-opus-4-7
 ```
 
 ### Claude Code
 
-Edit `~/.claude/config.json`:
+Edit `~/.claude/settings.json`:
 
 ```json
 {
-  "anthropic_api_base": "http://localhost:20128/v1",
-  "anthropic_api_key": "your-omniroute-api-key"
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:20128",
+    "ANTHROPIC_AUTH_TOKEN": "your-omniroute-api-key"
+  }
 }
 ```
+
+Use the Claude-compatible root endpoint here. Do not append `/v1` to `ANTHROPIC_BASE_URL`.
 
 ### Codex CLI
 
@@ -313,7 +317,7 @@ Edit `~/.openclaw/openclaw.json`:
 Provider: OpenAI Compatible
 Base URL: http://localhost:20128/v1
 API Key: [from dashboard]
-Model: cc/claude-opus-4-6
+Model: cc/claude-opus-4-7
 ```
 
 ---
@@ -523,7 +527,7 @@ post_install() {
 | Variable                                | Default                              | Description                                                                                               |
 | --------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | `JWT_SECRET`                            | `omniroute-default-secret-change-me` | JWT signing secret (**change in production**)                                                             |
-| `INITIAL_PASSWORD`                      | `123456`                             | First login password                                                                                      |
+| `INITIAL_PASSWORD`                      | `CHANGEME`                           | First login password                                                                                      |
 | `DATA_DIR`                              | `~/.omniroute`                       | Data directory (db, usage, logs)                                                                          |
 | `PORT`                                  | framework default                    | Service port (`20128` in examples)                                                                        |
 | `HOSTNAME`                              | framework default                    | Bind host (Docker defaults to `0.0.0.0`)                                                                  |
@@ -552,43 +556,45 @@ For the full environment variable reference, see the [README](../README.md).
 <details>
 <summary><b>View all available models</b></summary>
 
-**Claude Code (`cc/`)** — Pro/Max: `cc/claude-opus-4-6`, `cc/claude-sonnet-4-5-20250929`, `cc/claude-haiku-4-5-20251001`
+**Claude Code (`cc/`)** — Pro/Max: `cc/claude-opus-4-7`, `cc/claude-sonnet-4-6`, `cc/claude-haiku-4-5-20251001`
 
-**Codex (`cx/`)** — Plus/Pro: `cx/gpt-5.2-codex`, `cx/gpt-5.1-codex-max`
+**Codex (`cx/`)** — Plus/Pro: `cx/gpt-5.5`, `cx/gpt-5.4`, `cx/gpt-5.3-codex-spark`, `cx/gpt-5.3-codex`
 
-**Gemini CLI (`gc/`)** — FREE: `gc/gemini-3-flash-preview`, `gc/gemini-2.5-pro`
+**Gemini CLI (`gc/`)** — FREE: `gc/gemini-3-flash-preview`, `gc/gemini-3.1-flash-lite-preview`
 
-**GitHub Copilot (`gh/`)**: `gh/gpt-5`, `gh/claude-4.5-sonnet`
+**GitHub Copilot (`gh/`)**: `gh/gpt-5-5`, `gh/gpt-5-4`, `gh/claude-opus-4.7`, `gh/claude-sonnet-4.6`, `gh/claude-haiku-4.5`
 
-**GLM (`glm/`)** — $0.6/1M: `glm/glm-4.7`
+**GLM (`glm/`)** — $0.6/1M: `glm/glm-5.1`
 
-**MiniMax (`minimax/`)** — $0.2/1M: `minimax/MiniMax-M2.1`
+**MiniMax (`minimax/`)** — $0.2/1M: `minimax/MiniMax-M2.7`, `minimax/MiniMax-M2.5`
 
 **Qoder (`if/`)** — FREE: `if/kimi-k2-thinking`, `if/qwen3-coder-plus`, `if/deepseek-r1`
 
-**Qwen (`qw/`)** — FREE: `qw/qwen3-coder-plus`, `qw/qwen3-coder-flash`
+**Qwen (`qw/`)**: `qw/qwen3-coder-plus`, `qw/qwen3-coder-flash`
 
 **Kiro (`kr/`)** — FREE: `kr/claude-sonnet-4.5`, `kr/claude-haiku-4.5`
 
-**DeepSeek (`ds/`)**: `ds/deepseek-chat`, `ds/deepseek-reasoner`
+**DeepSeek (`ds/`)**: `ds/deepseek-v4-pro`, `ds/deepseek-v4-flash`
 
 **Groq (`groq/`)**: `groq/llama-3.3-70b-versatile`, `groq/llama-4-maverick-17b-128e-instruct`
 
-**xAI (`xai/`)**: `xai/grok-4`, `xai/grok-4-0709-fast-reasoning`, `xai/grok-code-mini`
+**xAI (`xai/`)**: `xai/grok-4.3`, `xai/grok-4.20-0309-reasoning`, `xai/grok-4.20-0309-non-reasoning`
 
-**Mistral (`mistral/`)**: `mistral/mistral-large-2501`, `mistral/codestral-2501`
+**Mistral (`mistral/`)**: `mistral/mistral-large-latest`, `mistral/mistral-medium-3-5`, `mistral/mistral-small-latest`, `mistral/devstral-latest`, `mistral/codestral-latest`
 
-**Perplexity (`pplx/`)**: `pplx/sonar-pro`, `pplx/sonar`
+**Perplexity (`pplx/`)**: `pplx/sonar-deep-research`, `pplx/sonar-reasoning-pro`, `pplx/sonar-pro`, `pplx/sonar`
 
 **Together AI (`together/`)**: `together/meta-llama/Llama-3.3-70B-Instruct-Turbo`
 
 **Fireworks AI (`fireworks/`)**: `fireworks/accounts/fireworks/models/deepseek-v3p1`
 
-**Cerebras (`cerebras/`)**: `cerebras/llama-3.3-70b`
+**Cerebras (`cerebras/`)**: `cerebras/zai-glm-4.7`, `cerebras/gpt-oss-120b`
 
 **Cohere (`cohere/`)**: `cohere/command-r-plus-08-2024`
 
 **NVIDIA NIM (`nvidia/`)**: `nvidia/nvidia/llama-3.3-70b-instruct`
+
+**Baidu Qianfan (`qianfan/`)**: `qianfan/ernie-5.1`, `qianfan/ernie-5.0-thinking-latest`, `qianfan/ernie-x1.1`
 
 </details>
 
@@ -604,10 +610,10 @@ Add any model ID to any provider without waiting for an app update:
 # Via API
 curl -X POST http://localhost:20128/api/provider-models \
   -H "Content-Type: application/json" \
-  -d '{"provider": "openai", "modelId": "gpt-4.5-preview", "modelName": "GPT-4.5 Preview"}'
+  -d '{"provider": "openai", "modelId": "gpt-5.2", "modelName": "GPT-5.2"}'
 
 # List: curl http://localhost:20128/api/provider-models?provider=openai
-# Remove: curl -X DELETE "http://localhost:20128/api/provider-models?provider=openai&model=gpt-4.5-preview"
+# Remove: curl -X DELETE "http://localhost:20128/api/provider-models?provider=openai&model=gpt-5.2"
 ```
 
 Or use Dashboard: **Providers → [Provider] → Custom Models**.
@@ -671,6 +677,7 @@ Returns models grouped by provider with types (`chat`, `embedding`, `image`).
 - Managed Quick Tunnels default to HTTP/2 transport to avoid noisy QUIC UDP buffer warnings in constrained containers
 - Set `CLOUDFLARED_PROTOCOL=quic` or `auto` if you want to override the managed transport choice
 - Set `CLOUDFLARED_BIN` if you prefer using a preinstalled `cloudflared` binary instead of the managed download
+- Cloudflare Quick Tunnel, Tailscale Funnel, and ngrok Tunnel panels can be shown or hidden in **Settings → Appearance**. Hiding a panel does not stop a running tunnel.
 
 ### LLM Gateway Intelligence (Phase 9)
 
@@ -733,8 +740,8 @@ underscores_in_headers on;
 Create wildcard patterns to remap model names:
 
 ```
-Pattern: claude-sonnet-*     →  Target: cc/claude-sonnet-4-5-20250929
-Pattern: gpt-*               →  Target: gh/gpt-5.1-codex
+Pattern: claude-sonnet-*     →  Target: cc/claude-sonnet-4-6
+Pattern: gpt-*               →  Target: gh/gpt-5.3-codex
 ```
 
 Wildcards support `*` (any characters) and `?` (single character).
@@ -745,8 +752,8 @@ Define global fallback chains that apply across all requests:
 
 ```
 Chain: production-fallback
-  1. cc/claude-opus-4-6
-  2. gh/gpt-5.1-codex
+  1. cc/claude-opus-4-7
+  2. gh/gpt-5.3-codex
   3. glm/glm-4.7
 ```
 
@@ -756,35 +763,34 @@ Chain: production-fallback
 
 Configure via **Dashboard → Settings → Resilience**.
 
-OmniRoute implements provider-level resilience with four components:
+OmniRoute implements provider-level resilience with five components:
 
-1. **Provider Profiles** — Per-provider configuration for:
-   - **Transient Cooldown** — Base cooldown for transient upstream failures
-   - **Rate Limit Cooldown** — Base cooldown for `429`-driven lockouts
-   - **Max Backoff Level** — Maximum exponential backoff level for repeated failures
-   - **CB Threshold** — Failure count before model quarantine / provider circuit breaker escalates
-   - **CB Reset Time** — Failure counting window and breaker reset timer
-
-2. **Editable Rate Limits** — System-level defaults configurable in the dashboard:
+1. **Request Queue & Pacing** — System-level request shaping:
    - **Requests Per Minute (RPM)** — Maximum requests per minute per account
    - **Min Time Between Requests** — Minimum gap in milliseconds between requests
    - **Max Concurrent Requests** — Maximum simultaneous requests per account
-   - Click **Edit** to modify, then **Save** or **Cancel**. Values persist via the resilience API.
 
-3. **Circuit Breaker** — Tracks failures per provider and automatically opens the circuit when the configured threshold is reached:
+2. **Connection Cooldown** — Per-auth-type configuration for a single connection after retryable failures:
+   - **Base Cooldown** — Default cooldown window for retryable upstream failures
+   - **Use Upstream Retry Hints** — Honors authoritative `Retry-After` or reset hints when provided
+   - **Max Backoff Steps** — Maximum exponential backoff level for repeated failures
+
+3. **Provider Circuit Breaker** — Tracks end-to-end provider failures and automatically opens the breaker when the configured threshold is reached:
+   - **Failure Threshold** — Consecutive provider failures before opening the breaker
+   - **Reset Timeout** — Time window before the provider is tested again
    - **CLOSED** (Healthy) — Requests flow normally
    - **OPEN** — Provider is temporarily blocked after repeated failures
    - **HALF_OPEN** — Testing if provider has recovered
 
-   The same provider profile also drives model-scoped lockouts:
-   - Account/model lockouts react immediately to authoritative `429` / `404` signals and use the configured cooldown + backoff values
-   - Global provider/model quarantine only activates after repeated exhaustion hits the configured **CB Threshold** within **CB Reset Time**
+   Connection-scoped `429` rate limits stay in **Connection Cooldown** and do not count toward the provider breaker.
 
-4. **Policies & Locked Identifiers** — Shows circuit breaker status and locked identifiers with force-unlock capability.
+   The provider breaker runtime state is shown on **Dashboard → Health** only.
 
-5. **Rate Limit Auto-Detection** — Monitors `429` and `Retry-After` headers to proactively avoid hitting provider rate limits. When an upstream provider returns an explicit wait window, that authoritative `Retry-After` value overrides the base cooldown from the provider profile.
+4. **Wait For Cooldown** — If every candidate connection is already cooling down, OmniRoute can wait for the earliest cooldown and retry the same client request automatically.
 
-**Pro Tip:** Use **Reset All** button to clear all circuit breakers and cooldowns when a provider recovers from an outage.
+5. **Rate Limit Auto-Detection** — When upstream providers return explicit wait windows, those hints override the local connection cooldown when the setting is enabled.
+
+**Pro Tip:** Use the **Health** page to inspect and reset live provider breakers after an outage. The Resilience page only changes configuration.
 
 ---
 
@@ -824,14 +830,14 @@ curl -X POST http://localhost:20128/api/db-backups/import \
 
 The settings page is organized into 6 tabs for easy navigation:
 
-| Tab            | Contents                                                                                       |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| **General**    | System storage tools, appearance settings, theme controls, and per-item sidebar visibility     |
-| **Security**   | Login/Password settings, IP Access Control, API auth for `/models`, and Provider Blocking      |
-| **Routing**    | Global routing strategy (6 options), wildcard model aliases, fallback chains, combo defaults   |
-| **Resilience** | Provider profiles, editable rate limits, circuit breaker status, policies & locked identifiers |
-| **AI**         | Thinking budget configuration, global system prompt injection, prompt cache stats              |
-| **Advanced**   | Global proxy configuration (HTTP/SOCKS5)                                                       |
+| Tab            | Contents                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------- |
+| **General**    | System storage tools, appearance settings, theme controls, sidebar visibility, and Endpoint tunnel visibility |
+| **Security**   | Login/Password settings, IP Access Control, API auth for `/models`, and Provider Blocking                     |
+| **Routing**    | Global routing strategy (6 options), wildcard model aliases, fallback chains, combo defaults                  |
+| **Resilience** | Request queue, connection cooldown, provider breaker config, and wait-for-cooldown behavior                   |
+| **AI**         | Thinking budget configuration, global system prompt injection, prompt cache stats                             |
+| **Advanced**   | Global proxy configuration (HTTP/SOCKS5)                                                                      |
 
 ---
 
@@ -904,9 +910,9 @@ Access via **Dashboard → Health**. Real-time system health overview with 6 car
 | Card                  | What It Shows                                               |
 | --------------------- | ----------------------------------------------------------- |
 | **System Status**     | Uptime, version, memory usage, data directory               |
-| **Provider Health**   | Per-provider circuit breaker state (Closed/Open/Half-Open)  |
-| **Rate Limits**       | Active rate limit cooldowns per account with remaining time |
-| **Active Lockouts**   | Providers temporarily blocked by the lockout policy         |
+| **Provider Health**   | Global provider circuit breaker runtime state               |
+| **Rate Limits**       | Active connection cooldowns per account with remaining time |
+| **Active Lockouts**   | Active model-scoped lockouts and temporary exclusions       |
 | **Signature Cache**   | Deduplication cache stats (active keys, hit rate)           |
 | **Latency Telemetry** | p50/p95/p99 latency aggregation per provider                |
 

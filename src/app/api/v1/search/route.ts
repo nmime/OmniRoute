@@ -1,10 +1,10 @@
-import { CORS_ORIGIN } from "@/shared/utils/cors";
 import { handleSearch } from "@omniroute/open-sse/handlers/search.ts";
 import { getProviderCredentials, extractApiKey, isValidApiKey } from "@/sse/services/auth";
 import {
   getAllSearchProviders,
   getSearchProvider,
   selectProvider,
+  supportsSearchType,
   SEARCH_PROVIDERS,
   SEARCH_CREDENTIAL_FALLBACKS,
 } from "@omniroute/open-sse/config/searchRegistry.ts";
@@ -23,7 +23,6 @@ import {
 } from "@omniroute/open-sse/services/searchCache.ts";
 
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": CORS_ORIGIN,
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "*",
 };
@@ -64,6 +63,15 @@ async function resolveSearchCredentials(providerId: string) {
   return null;
 }
 
+async function resolveSearchExecutionCredentials(providerConfig: {
+  id: string;
+  authType: string;
+}): Promise<Record<string, any> | null> {
+  const credentials = await resolveSearchCredentials(providerConfig.id);
+  if (credentials) return credentials;
+  return providerConfig.authType === "none" ? {} : null;
+}
+
 // Helper: build domain filter array from filters object
 function buildDomainFilter(filters?: {
   include_domains?: string[];
@@ -94,24 +102,25 @@ export async function POST(request: Request) {
   }
   const body = validation.data;
 
-  // Optional API key validation
-  if (process.env.REQUIRE_API_KEY === "true") {
-    const apiKey = extractApiKey(request);
-    if (!apiKey) {
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    }
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) {
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
-    }
-  }
-
   // Enforce API key policies — use "search" as model identifier for consistent policy config
   const policy = await enforceApiKeyPolicy(request, "search");
   if (policy.rejection) return policy.rejection;
 
   // Resolve provider and credentials
-  let providerConfig = selectProvider(body.provider);
+  if (body.provider) {
+    const explicitProvider = getSearchProvider(body.provider);
+    if (!explicitProvider) {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, `Unknown search provider: ${body.provider}`);
+    }
+    if (!supportsSearchType(explicitProvider, body.search_type)) {
+      return errorResponse(
+        HTTP_STATUS.BAD_REQUEST,
+        `Search provider ${body.provider} does not support search_type: ${body.search_type}`
+      );
+    }
+  }
+
+  let providerConfig = selectProvider(body.provider, body.search_type);
   if (!providerConfig) {
     return errorResponse(
       HTTP_STATUS.BAD_REQUEST,
@@ -125,7 +134,7 @@ export async function POST(request: Request) {
 
   if (body.provider) {
     // Explicit provider — single credential lookup (with fallback)
-    credentials = await resolveSearchCredentials(providerConfig.id);
+    credentials = await resolveSearchExecutionCredentials(providerConfig);
     if (!credentials) {
       return errorResponse(
         HTTP_STATUS.BAD_REQUEST,
@@ -134,18 +143,19 @@ export async function POST(request: Request) {
     }
   } else {
     // Auto-select — try the resolved provider first, then iterate others by cost
-    credentials = await resolveSearchCredentials(providerConfig.id);
+    credentials = await resolveSearchExecutionCredentials(providerConfig);
 
     if (!credentials) {
       // Sort by cost to find cheapest with credentials
       const sortedIds = Object.values(SEARCH_PROVIDERS)
+        .filter((provider) => supportsSearchType(provider, body.search_type))
         .sort((a, b) => a.costPerQuery - b.costPerQuery)
         .map((p) => p.id);
 
       for (const pid of sortedIds) {
         if (pid === providerConfig.id) continue;
         const altConfig = getSearchProvider(pid);
-        const altCreds = await resolveSearchCredentials(pid);
+        const altCreds = altConfig ? await resolveSearchExecutionCredentials(altConfig) : null;
         if (altConfig && altCreds) {
           providerConfig = altConfig;
           credentials = altCreds;
@@ -163,12 +173,14 @@ export async function POST(request: Request) {
 
     // Find alternate for failover — must bind credentials to the matched provider
     const otherIds = Object.values(SEARCH_PROVIDERS)
+      .filter((provider) => supportsSearchType(provider, body.search_type))
       .sort((a, b) => a.costPerQuery - b.costPerQuery)
       .map((p) => p.id)
       .filter((id) => id !== providerConfig.id);
 
     for (const pid of otherIds) {
-      const creds = await resolveSearchCredentials(pid);
+      const altConfig = getSearchProvider(pid);
+      const creds = altConfig ? await resolveSearchExecutionCredentials(altConfig) : null;
       if (creds) {
         alternateProviderId = pid;
         alternateCredentials = creds;

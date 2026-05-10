@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
+import { requireCliToolsAuth } from "@/lib/api/requireCliToolsAuth";
 import { getRuntimePorts } from "@/lib/runtime/ports";
 import { getOpenCodeConfigPath } from "@/shared/services/cliRuntime";
-import { mergeOpenCodeConfig } from "@/shared/services/opencodeConfig";
+import { mergeOpenCodeConfigText } from "@/shared/services/opencodeConfig";
 import { guideSettingsSaveSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
+import { resolveApiKey, getOrCreateApiKey } from "@/shared/services/apiKeyResolver";
 
 /**
  * POST /api/cli-tools/guide-settings/:toolId
@@ -15,6 +17,9 @@ import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
  * Currently supports: continue, opencode
  */
 export async function POST(request, { params }) {
+  const authError = await requireCliToolsAuth(request);
+  if (authError) return authError;
+
   let rawBody;
   try {
     rawBody = await request.json();
@@ -35,7 +40,13 @@ export async function POST(request, { params }) {
   if (isValidationFailure(validation)) {
     return NextResponse.json({ error: validation.error }, { status: 400 });
   }
-  const { baseUrl, apiKey, model } = validation.data;
+  const { baseUrl, model, models, modelLabels } = validation.data;
+  // (#523) Extract keyId BEFORE validation — Zod strips unknown fields!
+  const apiKeyId = typeof rawBody?.keyId === "string" ? rawBody.keyId.trim() : null;
+  // If no keyId provided, auto-create a valid DB-backed key instead of using placeholder
+  const apiKey = apiKeyId
+    ? await resolveApiKey(apiKeyId, validation.data.apiKey)
+    : await getOrCreateApiKey();
 
   try {
     switch (toolId) {
@@ -43,8 +54,10 @@ export async function POST(request, { params }) {
         return await saveContinueConfig({ baseUrl, apiKey, model });
       case "opencode":
         // (#524) OpenCode config was never saved because only 'continue' was handled here.
-        // opencode reads ~/.config/opencode/config.toml — write the OmniRoute settings there.
-        return await saveOpenCodeConfig({ baseUrl, apiKey, model });
+        // OpenCode reads ~/.config/opencode/opencode.json — write the OmniRoute settings there.
+        return await saveOpenCodeConfig({ baseUrl, apiKey, model, models, modelLabels });
+      case "qwen":
+        return await saveQwenConfig({ baseUrl, apiKey, model });
       default:
         return NextResponse.json(
           { error: `Direct config save not supported for: ${toolId}` },
@@ -139,7 +152,7 @@ async function saveContinueConfig({ baseUrl, apiKey, model }) {
  *
  * (#524) OpenCode was silently failing because this handler was missing.
  */
-async function saveOpenCodeConfig({ baseUrl, apiKey, model }) {
+async function saveOpenCodeConfig({ baseUrl, apiKey, model, models, modelLabels }) {
   const configPath = getOpenCodeConfigPath();
   const configDir = path.dirname(configPath);
 
@@ -150,26 +163,81 @@ async function saveOpenCodeConfig({ baseUrl, apiKey, model }) {
     .trim()
     .replace(/\/+$/, "");
 
-  // Read existing JSON to preserve other provider entries
+  // Read existing JSONC/JSON text to preserve unrelated config formatting and fields.
+  let existingConfigText = "";
+  try {
+    existingConfigText = await fs.readFile(configPath, "utf-8");
+  } catch {
+    // File doesn't exist — start fresh
+  }
+
+  const nextConfigText = mergeOpenCodeConfigText(existingConfigText, {
+    baseUrl: normalizedBaseUrl,
+    apiKey,
+    model,
+    models,
+    modelLabels,
+  });
+
+  await fs.writeFile(configPath, nextConfigText, "utf-8");
+
+  return NextResponse.json({
+    success: true,
+    message: `OpenCode config saved to ${configPath}`,
+    configPath,
+  });
+}
+
+/**
+ * Save Qwen Code config to ~/.qwen/settings.json
+ *
+ * Uses security.auth format (not modelProviders) since Qwen Code
+ * prioritizes security.auth.selectedType over modelProviders entries.
+ * Per official docs: security.auth takes highest precedence.
+ */
+async function saveQwenConfig({ baseUrl, apiKey, model }) {
+  const home = os.homedir();
+  const configPath = path.join(home, ".qwen", "settings.json");
+
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+
+  const normalizedBaseUrl = String(baseUrl || "")
+    .trim()
+    .replace(/\/+$/, "");
+  const resolvedApiKey = apiKey || "sk_omniroute";
+  const resolvedModel = model || "gemini-cli/gemini-3.1-pro-preview";
+
+  // Read existing config to preserve other settings (permissions, mcpServers, etc.)
   let existingConfig: Record<string, any> = {};
   try {
     const raw = await fs.readFile(configPath, "utf-8");
     existingConfig = JSON.parse(raw);
   } catch {
-    // File doesn't exist or invalid JSON — start fresh
+    // File doesn't exist or invalid JSON
   }
 
-  const nextConfig = mergeOpenCodeConfig(existingConfig, {
-    baseUrl: normalizedBaseUrl,
-    apiKey,
-    model,
-  });
+  // Set security.auth for openai auth type with direct credentials
+  // This takes priority over modelProviders entries (per Qwen docs)
+  existingConfig.security = {
+    ...existingConfig.security,
+    auth: {
+      selectedType: "openai",
+      apiKey: resolvedApiKey,
+      baseUrl: normalizedBaseUrl,
+    },
+  };
 
-  await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2), "utf-8");
+  // Set model to the selected model
+  existingConfig.model = {
+    ...existingConfig.model,
+    name: resolvedModel,
+  };
+
+  await fs.writeFile(configPath, JSON.stringify(existingConfig, null, 2), "utf-8");
 
   return NextResponse.json({
     success: true,
-    message: `OpenCode config saved to ${configPath}`,
+    message: `Qwen Code config saved to ${configPath}`,
     configPath,
   });
 }

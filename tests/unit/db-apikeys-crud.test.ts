@@ -21,7 +21,7 @@ async function resetStorage() {
         fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
       }
       break;
-    } catch (error) {
+    } catch (error: any) {
       if ((error?.code === "EBUSY" || error?.code === "EPERM") && attempt < 9) {
         await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       } else {
@@ -147,4 +147,34 @@ test("getApiKeyMetadata ignores malformed stored schedule payloads", async () =>
   const metadata = await apiKeysDb.getApiKeyMetadata(created.key);
 
   assert.equal(metadata.accessSchedule, null);
+});
+
+test("createApiKey persists scopes and getApiKeyMetadata reads them back", async () => {
+  const key = await apiKeysDb.createApiKey("Manage Key", "machine-303", ["manage"]);
+  const metadata = await apiKeysDb.getApiKeyMetadata(key.key);
+
+  assert.ok(metadata);
+  assert.deepEqual(metadata.scopes, ["manage"]);
+  assert.deepEqual(key.scopes, ["manage"]);
+});
+
+test("updateApiKeyPermissions persists scopes and getApiKeyMetadata reads them back", async () => {
+  const key = await apiKeysDb.createApiKey("Plain Key", "machine-303");
+  const metaBefore = await apiKeysDb.getApiKeyMetadata(key.key);
+  assert.deepEqual(metaBefore.scopes, []);
+
+  await apiKeysDb.updateApiKeyPermissions(key.id, { scopes: ["manage"] });
+  apiKeysDb.clearApiKeyCaches();
+
+  const metaAfter = await apiKeysDb.getApiKeyMetadata(key.key);
+  assert.deepEqual(metaAfter.scopes, ["manage"]);
+});
+
+test("updateApiKeyPermissions can clear scopes back to empty", async () => {
+  const key = await apiKeysDb.createApiKey("Admin Key", "machine-303", ["manage"]);
+  await apiKeysDb.updateApiKeyPermissions(key.id, { scopes: [] });
+  apiKeysDb.clearApiKeyCaches();
+
+  const metadata = await apiKeysDb.getApiKeyMetadata(key.key);
+  assert.deepEqual(metadata.scopes, []);
 });

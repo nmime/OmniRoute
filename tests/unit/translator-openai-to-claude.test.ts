@@ -11,6 +11,16 @@ const {
 const { CLAUDE_SYSTEM_PROMPT } = await import("../../open-sse/config/constants.ts");
 const { DEFAULT_THINKING_CLAUDE_SIGNATURE } =
   await import("../../open-sse/config/defaultThinkingSignature.ts");
+const { getModelsByProviderId } = await import("../../open-sse/config/providerModels.ts");
+
+function getClaudeEffortFixtures() {
+  const claudeModels = getModelsByProviderId("claude");
+  const xhighModel = claudeModels.find((model) => model.supportsXHighEffort === true);
+  const standardModel = claudeModels.find((model) => model.supportsXHighEffort === false);
+  assert.ok(xhighModel, "expected at least one Claude model with xhigh support");
+  assert.ok(standardModel, "expected at least one Claude model without xhigh support");
+  return { xhighModel, standardModel };
+}
 
 test("OpenAI -> Claude helpers normalize array content and strip empty nested text blocks", () => {
   const normalized = normalizeContentToString([
@@ -73,8 +83,7 @@ test("OpenAI -> Claude maps system messages, parameters and assistant cache mark
   assert.equal(result.temperature, 0.25);
   assert.equal(result.top_p, 0.8);
   assert.deepEqual(result.stop_sequences, ["DONE"]);
-  assert.equal(result.system[0].text, CLAUDE_SYSTEM_PROMPT);
-  assert.equal(result.system[1].text, "Rule A\nRule B\nRule C");
+  assert.equal(result.system[0].text, "Rule A\nRule B\nRule C");
   assert.equal(result.messages[0].role, "user");
   assert.deepEqual(result.messages[0].content, [{ type: "text", text: "Hello" }]);
   assert.equal(result.messages[1].role, "assistant");
@@ -210,8 +219,8 @@ test("OpenAI -> Claude maps tool_choice and injects response_format instructions
   );
 
   assert.deepEqual(schemaResult.tool_choice, { type: "any" });
-  assert.match(schemaResult.system[1].text, /strictly follows this JSON schema/i);
-  assert.match(schemaResult.system[1].text, /"answer"/);
+  assert.match(schemaResult.system[0].text, /strictly follows this JSON schema/i);
+  assert.match(schemaResult.system[0].text, /"answer"/);
 
   const jsonObjectResult = openaiToClaudeRequest(
     "claude-4-sonnet",
@@ -224,7 +233,7 @@ test("OpenAI -> Claude maps tool_choice and injects response_format instructions
   );
 
   assert.deepEqual(jsonObjectResult.tool_choice, { type: "tool", name: "emit_json" });
-  assert.match(jsonObjectResult.system[1].text, /Respond ONLY with a JSON object/i);
+  assert.match(jsonObjectResult.system[0].text, /Respond ONLY with a JSON object/i);
 });
 
 test("OpenAI -> Claude turns reasoning settings into thinking budgets and expands max tokens", () => {
@@ -257,6 +266,33 @@ test("OpenAI -> Claude turns reasoning settings into thinking budgets and expand
     max_tokens: 3000,
   });
   assert.equal(explicitThinkingResult.max_tokens, 10192);
+});
+
+test("OpenAI -> Claude preserves xhigh only for Claude models that expose it", () => {
+  const { xhighModel, standardModel } = getClaudeEffortFixtures();
+  const preserved = openaiToClaudeRequest(
+    xhighModel.id,
+    {
+      messages: [{ role: "user", content: "Think harder" }],
+      reasoning_effort: "xhigh",
+    },
+    false
+  );
+  const downgraded = openaiToClaudeRequest(
+    standardModel.id,
+    {
+      messages: [{ role: "user", content: "Think harder" }],
+      max_tokens: 10,
+      reasoning_effort: "xhigh",
+    },
+    false
+  );
+
+  assert.deepEqual(preserved.thinking, { type: "adaptive" });
+  assert.deepEqual(preserved.output_config, { effort: "xhigh" });
+  assert.deepEqual(downgraded.thinking, { type: "enabled", budget_tokens: 131072 });
+  assert.equal(downgraded.output_config, undefined);
+  assert.equal(downgraded.max_tokens, 139264);
 });
 
 test("OpenAI -> Claude can disable OAuth prefixes and Antigravity strips Claude-only prompting", () => {

@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
-import Image from "next/image";
 import CliStatusBadge from "./CliStatusBadge";
 import { useTranslations } from "next-intl";
+
+import ProviderIcon from "@/shared/components/ProviderIcon";
 
 export default function CodexToolCard({
   tool,
@@ -25,8 +26,9 @@ export default function CodexToolCard({
   const [message, setMessage] = useState(null);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
   const [selectedApiKey, setSelectedApiKey] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedModel, setSelectedModel] = useState("gpt-5.5");
   const CODEX_DEFAULT_MODELS = [
+    "gpt-5.5",
     "gpt-5.3-codex",
     "gpt-5.4",
     "gpt-5.2-codex",
@@ -35,7 +37,7 @@ export default function CodexToolCard({
     "gpt-5.1-codex-mini",
   ];
   const [modelMappings, setModelMappings] = useState<Record<string, string>>({});
-  const [reasoningEffort, setReasoningEffort] = useState("medium");
+  const [reasoningEffort, setReasoningEffort] = useState("xhigh");
   const [wireApi, setWireApi] = useState("chat");
   const [modalOpen, setModalOpen] = useState(false);
   const [modalTarget, setModalTarget] = useState<string | null>(null); // null = default model, string = mapping key
@@ -177,7 +179,12 @@ export default function CodexToolCard({
         setMessage({ type: "success", text: t("settingsApplied") });
         checkCodexStatus();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedApplySettings") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedApplySettings"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -197,7 +204,12 @@ export default function CodexToolCard({
         setSelectedModel("");
         checkCodexStatus();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedResetSettings") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedResetSettings"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -245,7 +257,12 @@ export default function CodexToolCard({
         setNewProfileName("");
         fetchProfiles();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedSaveProfile") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedSaveProfile"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -269,7 +286,12 @@ export default function CodexToolCard({
         checkCodexStatus();
         fetchBackups();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedActivateProfile") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedActivateProfile"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -317,7 +339,12 @@ export default function CodexToolCard({
         checkCodexStatus();
         fetchBackups();
       } else {
-        setMessage({ type: "error", text: data.error || t("failedRestore") });
+        setMessage({
+          type: "error",
+          text:
+            (typeof data.error === "string" ? data.error : data.error?.message) ||
+            t("failedRestore"),
+        });
       }
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -382,17 +409,7 @@ openai_base_url = "${getEffectiveBaseUrl()}"
       <div className="flex items-center justify-between hover:cursor-pointer" onClick={onToggle}>
         <div className="flex items-center gap-3">
           <div className="size-8 flex items-center justify-center shrink-0">
-            <Image
-              src="/providers/codex.png"
-              alt={tool.name}
-              width={32}
-              height={32}
-              className="size-8 object-contain rounded-lg"
-              sizes="32px"
-              onError={(e) => {
-                (e.currentTarget as HTMLElement).style.display = "none";
-              }}
-            />
+            <ProviderIcon providerId="codex" size={32} type="color" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -584,7 +601,7 @@ openai_base_url = "${getEffectiveBaseUrl()}"
                     type="text"
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
-                    placeholder="gpt-5.4"
+                    placeholder="gpt-5.5"
                     className="flex-1 px-2 py-1.5 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
                   />
                   {selectedModel && (
@@ -615,6 +632,7 @@ openai_base_url = "${getEffectiveBaseUrl()}"
                     <option value="low">Low</option>
                     <option value="medium">Medium</option>
                     <option value="high">High</option>
+                    <option value="xhigh">XHigh</option>
                   </select>
                 </div>
 

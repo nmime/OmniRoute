@@ -7,6 +7,7 @@ import {
 } from "../helpers/geminiHelper.ts";
 import { DEFAULT_THINKING_GEMINI_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { buildGeminiTools, sanitizeGeminiToolName } from "../helpers/geminiToolsSanitizer.ts";
+import { capMaxOutputTokens } from "../../../src/lib/modelCapabilities.ts";
 
 /**
  * Direct Claude → Gemini request translator.
@@ -25,7 +26,11 @@ export function claudeToGeminiRequest(model, body, stream) {
     generationConfig: Record<string, unknown>;
     safetySettings: unknown;
     systemInstruction?: { role: string; parts: Array<{ text: string }> };
-    tools?: Array<{ functionDeclarations: Array<Record<string, unknown>> }>;
+    tools?: Array<{
+      functionDeclarations?: Array<Record<string, unknown>>;
+      googleSearch?: Record<string, unknown>;
+      googleSearchRetrieval?: Record<string, unknown>;
+    }>;
     _toolNameMap?: Map<string, string>;
   } = {
     model: model,
@@ -45,7 +50,7 @@ export function claudeToGeminiRequest(model, body, stream) {
     result.generationConfig.topK = body.top_k;
   }
   if (body.max_tokens !== undefined) {
-    result.generationConfig.maxOutputTokens = body.max_tokens;
+    result.generationConfig.maxOutputTokens = capMaxOutputTokens(model, body.max_tokens);
   }
 
   // ── System instruction ─────────────────────────────────────────
@@ -58,7 +63,7 @@ export function claudeToGeminiRequest(model, body, stream) {
     }
     if (systemText) {
       result.systemInstruction = {
-        role: "user",
+        role: "system",
         parts: [{ text: systemText }],
       };
     }
@@ -94,7 +99,6 @@ export function claudeToGeminiRequest(model, body, stream) {
               // Preserve thinking blocks as thought parts
               if (block.thinking) {
                 parts.push({ thought: true, text: block.thinking });
-                parts.push({ thoughtSignature: DEFAULT_THINKING_GEMINI_SIGNATURE, text: "" });
               }
               break;
 
@@ -152,21 +156,11 @@ export function claudeToGeminiRequest(model, body, stream) {
         // Map Claude roles to Gemini roles
         const geminiRole = msg.role === "assistant" ? "model" : "user";
 
-        // Gemini 3+ expects the signature on the first functionCall part in a tool-call
-        // batch. If the assistant turn had no explicit thinking block, inject a fallback
-        // signature into that first functionCall. (#927)
+        // Gemini 3+ expects the signature on all functionCall parts in a tool-call
+        // batch. If there is no real signature, we don't inject a fake one because
+        // Gemini API strictly validates it and returns 400.
         if (geminiRole === "model") {
-          const hasFunctionCall = parts.some((p) => p.functionCall);
-          const hasSignature = parts.some((p) => p.thoughtSignature);
-          if (hasFunctionCall && !hasSignature) {
-            const fcIndex = parts.findIndex((p) => p.functionCall);
-            if (fcIndex >= 0) {
-              parts[fcIndex] = {
-                ...parts[fcIndex],
-                thoughtSignature: DEFAULT_THINKING_GEMINI_SIGNATURE,
-              };
-            }
-          }
+          // No operation needed since we no longer inject fake signatures.
         }
 
         result.contents.push({ role: geminiRole, parts });
@@ -183,11 +177,31 @@ export function claudeToGeminiRequest(model, body, stream) {
   }
 
   // ── Thinking config ────────────────────────────────────────────
-  if (body.thinking?.type === "enabled" && body.thinking.budget_tokens) {
+  // Priority: thinking.budget_tokens (Claude native) > output_config.effort (Claude Code).
+  if (model.startsWith("gemma-4")) {
+    // gemma-4 models returns - 400: Thinking budget is not supported for this model
+  } else if (body.thinking?.type === "enabled" && body.thinking.budget_tokens) {
     result.generationConfig.thinkingConfig = {
       thinkingBudget: body.thinking.budget_tokens,
       includeThoughts: true,
     };
+  } else if (typeof body.output_config?.effort === "string") {
+    const effort = body.output_config.effort.toLowerCase();
+    const effortBudgetMap: Record<string, number> = {
+      none: 0,
+      low: 1024,
+      medium: 10240,
+      high: 32768,
+      max: 131072,
+      xhigh: 131072,
+    };
+    const budget = effortBudgetMap[effort];
+    if (budget !== undefined && budget > 0) {
+      result.generationConfig.thinkingConfig = {
+        thinkingBudget: budget,
+        includeThoughts: true,
+      };
+    }
   }
 
   const changedToolNameMap = new Map(

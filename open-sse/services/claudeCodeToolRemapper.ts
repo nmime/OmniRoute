@@ -10,7 +10,10 @@
  * - Response path: TitleCase → lowercase (for clients expecting lowercase)
  */
 
+import { EXTRA_TOOL_RENAME_MAP } from "./claudeCodeExtraRemap.ts";
+
 const TOOL_RENAME_MAP: Record<string, string> = {
+  ...EXTRA_TOOL_RENAME_MAP,
   bash: "Bash",
   read: "Read",
   write: "Write",
@@ -19,12 +22,15 @@ const TOOL_RENAME_MAP: Record<string, string> = {
   grep: "Grep",
   task: "Task",
   webfetch: "WebFetch",
+  websearch: "WebSearch",
   todowrite: "TodoWrite",
   todoread: "TodoRead",
   question: "Question",
   skill: "Skill",
   multiedit: "MultiEdit",
   notebook: "Notebook",
+  lsp: "Lsp",
+  apply_patch: "ApplyPatch",
 };
 
 const REVERSE_MAP: Record<string, string> = {};
@@ -32,7 +38,10 @@ for (const [k, v] of Object.entries(TOOL_RENAME_MAP)) {
   REVERSE_MAP[v] = k;
 }
 
-export function remapToolNamesInRequest(body: Record<string, unknown>): void {
+export function remapToolNamesInRequest(body: Record<string, unknown>): boolean {
+  let hasLowercase = false;
+  let hasTitleCase = false;
+
   // Remap tool definitions
   const tools = body.tools as Array<Record<string, unknown>> | undefined;
   if (Array.isArray(tools)) {
@@ -40,6 +49,9 @@ export function remapToolNamesInRequest(body: Record<string, unknown>): void {
       const name = String(tool.name || "");
       if (TOOL_RENAME_MAP[name]) {
         tool.name = TOOL_RENAME_MAP[name];
+        hasLowercase = true;
+      } else if (REVERSE_MAP[name]) {
+        hasTitleCase = true;
       }
     }
   }
@@ -53,7 +65,12 @@ export function remapToolNamesInRequest(body: Record<string, unknown>): void {
       for (const block of content) {
         if (block.type === "tool_use" && typeof block.name === "string") {
           const mapped = TOOL_RENAME_MAP[block.name];
-          if (mapped) block.name = mapped;
+          if (mapped) {
+            block.name = mapped;
+            hasLowercase = true;
+          } else if (REVERSE_MAP[block.name]) {
+            hasTitleCase = true;
+          }
         }
       }
     }
@@ -63,11 +80,24 @@ export function remapToolNamesInRequest(body: Record<string, unknown>): void {
   const toolChoice = body.tool_choice as Record<string, unknown> | undefined;
   if (toolChoice?.type === "tool" && typeof toolChoice.name === "string") {
     const mapped = TOOL_RENAME_MAP[toolChoice.name];
-    if (mapped) toolChoice.name = mapped;
+    if (mapped) {
+      toolChoice.name = mapped;
+      hasLowercase = true;
+    } else if (REVERSE_MAP[toolChoice.name]) {
+      hasTitleCase = true;
+    }
   }
+
+  if (hasLowercase && !hasTitleCase) {
+    body._claudeCodeRequiresLowercaseToolNames = true;
+  }
+
+  return hasLowercase && !hasTitleCase;
 }
 
-export function remapToolNamesInResponse(text: string): string {
+export function remapToolNamesInResponse(text: string, forceLowercase = true): string {
+  if (!forceLowercase) return text;
+
   // Replace TitleCase tool names back to lowercase in SSE chunks
   for (const [titleCase, lower] of Object.entries(REVERSE_MAP)) {
     // Match in "name":"ToolName" patterns

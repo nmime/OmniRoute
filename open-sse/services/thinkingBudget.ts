@@ -157,7 +157,7 @@ export function applyThinkingBudget(body, config = null) {
   if (!body || typeof body !== "object") return body;
 
   // Early exit: strip ALL reasoning/thinking params for models that don't support them.
-  // Sending thinking params to unsupported models (e.g. AG claude-sonnet-4-6) causes 400 errors.
+  // Provider-specific Cloud Code restrictions should be handled at the executor boundary.
   const modelStr = typeof body.model === "string" ? body.model : "";
   if (modelStr && !supportsReasoning(modelStr)) {
     return stripThinkingConfig(body);
@@ -224,7 +224,8 @@ function setCustomBudget(body, budget) {
     };
   }
 
-  // OpenAI reasoning_effort mapping (T11: add 'max' tier for full budget)
+  // OpenAI reasoning_effort mapping.
+  // GPT-5/Codex accepts xhigh for the top tier; keep full budget aligned.
   if (result.reasoning_effort !== undefined || result.reasoning !== undefined) {
     if (budget <= 0) {
       delete result.reasoning_effort;
@@ -236,7 +237,7 @@ function setCustomBudget(body, budget) {
     } else if (budget < 131072) {
       result.reasoning_effort = "high";
     } else {
-      result.reasoning_effort = "max"; // T11: full budget → "max"
+      result.reasoning_effort = "xhigh";
     }
   }
 

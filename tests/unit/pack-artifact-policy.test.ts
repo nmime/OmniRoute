@@ -21,7 +21,13 @@ test("normalizeArtifactPath normalizes slashes and leading relative markers", ()
 
 test("findUnexpectedArtifactPaths flags staged app files outside the allowlist", () => {
   const unexpectedPaths = findUnexpectedArtifactPaths(
-    ["package-lock.json", "scripts/sync-env.mjs", "server.js"],
+    [
+      "open-sse/services/compression/engines/rtk/filters/generic-output.json",
+      "open-sse/services/compression/rules/en/filler.json",
+      "package-lock.json",
+      "scripts/sync-env.mjs",
+      "server.js",
+    ],
     {
       exactPaths: APP_STAGING_ALLOWED_EXACT_PATHS,
       prefixPaths: APP_STAGING_ALLOWED_PATH_PREFIXES,
@@ -33,7 +39,14 @@ test("findUnexpectedArtifactPaths flags staged app files outside the allowlist",
 
 test("findUnexpectedArtifactPaths flags app pack files outside the allowlist", () => {
   const unexpectedPaths = findUnexpectedArtifactPaths(
-    ["app/server.js", "app/scripts/sync-env.mjs", "app/scripts/prepublish.mjs", "docs/extra.md"],
+    [
+      "app/open-sse/services/compression/engines/rtk/filters/generic-output.json",
+      "app/open-sse/services/compression/rules/en/filler.json",
+      "app/server.js",
+      "app/scripts/sync-env.mjs",
+      "app/scripts/prepublish.mjs",
+      "docs/extra.md",
+    ],
     {
       exactPaths: PACK_ARTIFACT_ALLOWED_EXACT_PATHS,
       prefixPaths: PACK_ARTIFACT_ALLOWED_PATH_PREFIXES,
@@ -45,12 +58,23 @@ test("findUnexpectedArtifactPaths flags app pack files outside the allowlist", (
 
 test("findMissingArtifactPaths flags missing root runtime files in the tarball", () => {
   const missingPaths = findMissingArtifactPaths(
-    ["app/server.js", "bin/omniroute.ts", "package.json", "scripts/postinstall.mjs"],
+    [
+      "app/server.js",
+      "bin/omniroute.mjs",
+      "package.json",
+      "scripts/postinstall.mjs",
+      "scripts/postinstallSupport.mjs",
+    ],
     PACK_ARTIFACT_REQUIRED_PATHS
   );
 
   assert.deepEqual(missingPaths, [
+    "app/open-sse/services/compression/engines/rtk/filters/generic-output.json",
+    "app/open-sse/services/compression/rules/en/filler.json",
+    "app/responses-ws-proxy.mjs",
+    "app/server-ws.mjs",
     "bin/mcp-server.mjs",
+    "bin/nodeRuntimeSupport.mjs",
     "scripts/native-binary-compat.mjs",
     "src/shared/utils/nodeRuntimeSupport.ts",
   ]);

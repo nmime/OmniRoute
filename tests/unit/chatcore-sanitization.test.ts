@@ -186,6 +186,7 @@ test("chatCore sanitization preserves max_output_tokens for openai-responses tar
   // the translator (which converts max_tokens back) is skipped for same-format.
   const { call } = await invokeChatCore({
     endpoint: "/v1/responses",
+    provider: "codex",
     body: {
       model: "gpt-5.4",
       max_output_tokens: 4096,
@@ -208,11 +209,16 @@ test("chatCore sanitization preserves max_output_tokens for openai-responses tar
   });
 
   // max_output_tokens should survive sanitization for Responses targets
-  assert.equal("max_tokens" in call.body, false, "max_tokens must not be injected for Responses targets");
+  assert.equal(
+    "max_tokens" in call.body,
+    false,
+    "max_tokens must not be injected for Responses targets"
+  );
 
   // Reverse normalization: max_tokens → max_output_tokens for Responses targets
   const fromMaxTokens = await invokeChatCore({
     endpoint: "/v1/responses",
+    provider: "codex",
     body: {
       model: "gpt-5.4",
       max_tokens: 2048,
@@ -234,11 +240,16 @@ test("chatCore sanitization preserves max_output_tokens for openai-responses tar
       ),
   });
 
-  assert.equal("max_tokens" in fromMaxTokens.call.body, false, "max_tokens should be converted to max_output_tokens");
+  assert.equal(
+    "max_tokens" in fromMaxTokens.call.body,
+    false,
+    "max_tokens should be converted to max_output_tokens"
+  );
 
   // Reverse normalization: max_completion_tokens → max_output_tokens for Responses targets
   const fromMaxCompletion = await invokeChatCore({
     endpoint: "/v1/responses",
+    provider: "codex",
     body: {
       model: "gpt-5.4",
       max_completion_tokens: 8192,
@@ -260,7 +271,11 @@ test("chatCore sanitization preserves max_output_tokens for openai-responses tar
       ),
   });
 
-  assert.equal("max_completion_tokens" in fromMaxCompletion.call.body, false, "max_completion_tokens should be converted to max_output_tokens");
+  assert.equal(
+    "max_completion_tokens" in fromMaxCompletion.call.body,
+    false,
+    "max_completion_tokens should be converted to max_output_tokens"
+  );
 });
 
 test("chatCore sanitization strips empty message names and filters empty tool names", async () => {
@@ -430,6 +445,45 @@ test("chatCore sanitization normalizes mixed content blocks and removes unsuppor
   );
 });
 
+test("chatCore preserves Claude passthrough tool_result blocks instead of converting them to plain text", async () => {
+  const { call } = await invokeChatCore({
+    endpoint: "/v1/messages",
+    provider: "claude",
+    model: "claude-opus-4-7",
+    userAgent: "claude-cli/2.1.114",
+    body: {
+      model: "claude-opus-4-7",
+      max_tokens: 64,
+      system: [{ type: "text", text: "sys" }],
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_keep", name: "Bash", input: { command: "pwd" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_keep", content: "done" }],
+        },
+      ],
+      tools: [{ name: "Bash", input_schema: { type: "object", properties: {} } }],
+    },
+  });
+
+  assert.equal(call.body.messages[0].role, "assistant");
+  assert.equal(call.body.messages[0].content[0].type, "tool_use");
+  assert.equal(call.body.messages[1].role, "user");
+  assert.equal(call.body.messages[1].content[0].type, "tool_result");
+  assert.equal(call.body.messages[1].content[0].tool_use_id, "toolu_keep");
+  assert.equal(
+    call.body.messages[1].content.some(
+      (block) => block.type === "text" && /\[Tool Result:/.test(block.text)
+    ),
+    false
+  );
+});
+
 test("chatCore resolves stream mode from body.stream and Accept header", async () => {
   const explicitTrue = await invokeChatCore({
     accept: "application/json",
@@ -518,6 +572,45 @@ test("chatCore skips memory injection when memory is disabled or apiKeyInfo is m
   assert.equal(disabled.call.body.messages[0].content, "Hello");
   assert.equal(noApiKey.call.body.messages[0].role, "user");
   assert.equal(noApiKey.call.body.messages[0].content, "Hello");
+});
+
+test("chatCore does not share or persist memories when apiKeyInfo is missing", async () => {
+  await settingsDb.updateSettings({
+    memoryEnabled: true,
+    memoryMaxTokens: 1024,
+    memoryRetentionDays: 30,
+    memoryStrategy: "recent",
+  });
+  invalidateMemorySettingsCache();
+
+  await createMemory({
+    apiKeyId: "local",
+    sessionId: "shared-local-session",
+    type: "factual",
+    key: "pref:theme",
+    content: "Shared local memory should stay isolated.",
+    metadata: {},
+    expiresAt: null,
+  });
+
+  const { call } = await invokeChatCore({
+    body: {
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: "I prefer blue themes." }],
+    },
+  });
+
+  await waitForAsyncMemoryFlush();
+
+  const localMemoriesResult = await listMemories({ apiKeyId: "local" });
+  const localMemories = Array.isArray(localMemoriesResult)
+    ? localMemoriesResult
+    : (localMemoriesResult.data ?? []);
+
+  assert.equal(call.body.messages[0].role, "user");
+  assert.equal(call.body.messages[0].content, "I prefer blue themes.");
+  assert.equal(localMemories.length, 1);
+  assert.equal(localMemories[0].content, "Shared local memory should stay isolated.");
 });
 
 test("chatCore skips memory injection when shouldInjectMemory returns false for empty message lists", async () => {
@@ -626,4 +719,65 @@ test("chatCore extracts memories from Claude content arrays and Responses output
   assert.equal(claudeMemories[0].content, "strongly typed APIs");
   assert.equal(responsesMemories.length, 1);
   assert.equal(responsesMemories[0].content, "TypeScript for backend services");
+});
+
+test("chatCore request memory extraction for responses input ignores assistant items", async () => {
+  await settingsDb.updateSettings({
+    memoryEnabled: true,
+    memoryMaxTokens: 1024,
+    memoryRetentionDays: 30,
+    memoryStrategy: "recent",
+  });
+  invalidateMemorySettingsCache();
+
+  const responsesKeyId = `key-responses-request-memory-${Date.now()}`;
+  const responsesResult = await invokeChatCore({
+    endpoint: "/v1/responses",
+    apiKeyInfo: { id: responsesKeyId, name: "Responses Request Memory Key" },
+    body: {
+      model: "gpt-4o-mini",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "I prefer tea." }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "input_text", text: "I prefer coffee." }],
+        },
+      ],
+    },
+    responseFactory: () =>
+      new Response(
+        JSON.stringify({
+          id: "resp_request_memory",
+          object: "response",
+          status: "completed",
+          model: "gpt-4o-mini",
+          output_text: "ok",
+          usage: {
+            input_tokens: 4,
+            output_tokens: 1,
+            total_tokens: 5,
+          },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      ),
+  });
+
+  assert.equal(responsesResult.result.success, true);
+
+  await waitForAsyncMemoryFlush();
+
+  const memoriesResult = await listMemories({ apiKeyId: responsesKeyId });
+  const memories = Array.isArray(memoriesResult) ? memoriesResult : (memoriesResult.data ?? []);
+
+  assert.equal(memories.length, 1);
+  assert.match(memories[0].content, /tea/i);
+  assert.doesNotMatch(memories[0].content, /coffee/i);
 });

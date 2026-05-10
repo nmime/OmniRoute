@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { makeManagementSessionRequest } from "../helpers/managementSession.ts";
 
 const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-admin-audit-"));
 process.env.DATA_DIR = TEST_DATA_DIR;
@@ -117,45 +118,43 @@ test("auth login route records failed password attempts", async () => {
   assert.equal(event.actor, "anonymous");
   assert.equal(event.status, "failed");
   assert.equal(event.requestId, "req-auth-failed");
-  assert.deepEqual(event.metadata, { reason: "invalid_password" });
+  assert.deepEqual(event.metadata, { reason: "invalid_password", lockedOut: false });
 });
 
 test("provider create/update/delete routes emit sanitized credential audit events", async () => {
   const createResponse = await providersRoute.POST(
-    new Request("http://localhost/api/providers", {
+    await makeManagementSessionRequest("http://localhost/api/providers", {
       method: "POST",
       headers: {
-        "content-type": "application/json",
         "x-forwarded-for": "203.0.113.10",
         "x-request-id": "req-provider-create",
       },
-      body: JSON.stringify({
+      body: {
         provider: "openai",
         apiKey: "sk-secret-provider-key",
         name: "Primary OpenAI",
         defaultModel: "gpt-4o-mini",
-      }),
+      },
     })
   );
 
   assert.equal(createResponse.status, 201);
-  const createBody = await createResponse.json();
+  const createBody = (await createResponse.json()) as any;
   const connectionId = createBody.connection.id;
   assert.equal(typeof connectionId, "string");
 
   const updateResponse = await providerByIdRoute.PUT(
-    new Request(`http://localhost/api/providers/${connectionId}`, {
+    await makeManagementSessionRequest(`http://localhost/api/providers/${connectionId}`, {
       method: "PUT",
       headers: {
-        "content-type": "application/json",
         "x-forwarded-for": "203.0.113.10",
         "x-request-id": "req-provider-update",
       },
-      body: JSON.stringify({
+      body: {
         name: "Primary OpenAI Updated",
         defaultModel: "gpt-4.1-mini",
         isActive: false,
-      }),
+      },
     }),
     { params: Promise.resolve({ id: connectionId }) }
   );
@@ -163,7 +162,7 @@ test("provider create/update/delete routes emit sanitized credential audit event
   assert.equal(updateResponse.status, 200);
 
   const deleteResponse = await providerByIdRoute.DELETE(
-    new Request(`http://localhost/api/providers/${connectionId}`, {
+    await makeManagementSessionRequest(`http://localhost/api/providers/${connectionId}`, {
       method: "DELETE",
       headers: {
         "x-forwarded-for": "203.0.113.10",
@@ -180,23 +179,23 @@ test("provider create/update/delete routes emit sanitized credential audit event
   assert.equal(createdEvent.resourceType, "provider_credentials");
   assert.equal(createdEvent.requestId, "req-provider-create");
   assert.equal(createdEvent.target, "openai:Primary OpenAI");
-  assert.equal("apiKey" in createdEvent.metadata.connection, false);
+  assert.equal("apiKey" in (createdEvent.metadata as any).connection, false);
 
   const updatedEvent = compliance.getAuditLog({ action: "provider.credentials.updated" })[0];
   assert.equal(updatedEvent.requestId, "req-provider-update");
-  assert.deepEqual(updatedEvent.metadata.changedFields.sort(), [
+  assert.deepEqual((updatedEvent as any).metadata.changedFields.sort(), [
     "defaultModel",
     "isActive",
     "name",
   ]);
-  assert.equal(updatedEvent.metadata.before.name, "Primary OpenAI");
-  assert.equal(updatedEvent.metadata.after.name, "Primary OpenAI Updated");
-  assert.equal("apiKey" in updatedEvent.metadata.before, false);
-  assert.equal("apiKey" in updatedEvent.metadata.after, false);
+  assert.equal((updatedEvent as any).metadata.before.name, "Primary OpenAI");
+  (assert as any).equal((updatedEvent.metadata as any).after.name, "Primary OpenAI Updated");
+  (assert as any).equal("apiKey" in (updatedEvent.metadata as any).before, false);
+  (assert as any).equal("apiKey" in (updatedEvent.metadata as any).after, false);
 
   const revokedEvent = compliance.getAuditLog({ action: "provider.credentials.revoked" })[0];
   assert.equal(revokedEvent.requestId, "req-provider-delete");
   assert.equal(revokedEvent.target, "openai:Primary OpenAI Updated");
   assert.equal(revokedEvent.status, "success");
-  assert.equal("apiKey" in revokedEvent.metadata.connection, false);
+  assert.equal("apiKey" in (revokedEvent.metadata as any).connection, false);
 });

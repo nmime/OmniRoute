@@ -135,12 +135,12 @@ test("package.json test script runs tests", () => {
 
 // ─── Runtime Wiring Checks ───────────────────────────
 
-test("chat handler imports inputSanitizer", () => {
+test("chat handler wires guardrail pre-call validation", () => {
   const content = readIfExists("src/sse/handlers/chat.ts");
   assert.ok(content, "src/sse/handlers/chat.ts should exist");
   assert.ok(
-    content.includes("inputSanitizer") || content.includes("sanitizeRequest"),
-    "chat.ts should import and use input sanitizer"
+    content.includes("guardrailRegistry") && content.includes("runPreCallHooks"),
+    "chat.ts should route request validation through the guardrail registry"
   );
 });
 
@@ -213,13 +213,25 @@ test("MCP server enforces scopes from caller context before tool execution", () 
   );
 });
 
+test("ACP agents route requires management authentication before CLI discovery", () => {
+  const content = readIfExists("src/app/api/acp/agents/route.ts");
+  assert.ok(content, "src/app/api/acp/agents/route.ts should exist");
+  assert.ok(
+    content.includes('from "@/shared/utils/apiAuth"'),
+    "ACP agents route should import shared API auth"
+  );
+  assert.ok(
+    content.includes("if (!(await isAuthenticated(request)))"),
+    "ACP agents route should reject unauthenticated requests before spawning discovery"
+  );
+});
+
 test("T06 route payload validation uses validateBody in critical endpoints", () => {
   const targets = [
     "src/app/api/usage/budget/route.ts",
     "src/app/api/policies/route.ts",
     "src/app/api/fallback/chains/route.ts",
     "src/app/api/models/route.ts",
-    "src/app/api/models/availability/route.ts",
     "src/app/api/provider-models/route.ts",
     "src/app/api/pricing/route.ts",
     "src/app/api/rate-limits/route.ts",
@@ -269,5 +281,23 @@ test("T06 route payload validation uses validateBody in critical endpoints", () 
       content.includes("validateBody("),
       `${relPath} should validate payload with validateBody`
     );
+  }
+});
+
+test("OAuth routes that can create provider connections require auth guard", () => {
+  const targets = [
+    "src/app/api/oauth/[provider]/[action]/route.ts",
+    "src/app/api/oauth/cursor/import/route.ts",
+    "src/app/api/oauth/kiro/import/route.ts",
+    "src/app/api/oauth/kiro/social-authorize/route.ts",
+    "src/app/api/oauth/kiro/social-exchange/route.ts",
+  ];
+
+  for (const relPath of targets) {
+    const content = readIfExists(relPath);
+    assert.ok(content, `${relPath} should exist`);
+    assert.ok(content.includes("isAuthRequired"), `${relPath} should check whether auth is active`);
+    assert.ok(content.includes("isAuthenticated"), `${relPath} should require authenticated users`);
+    assert.ok(content.includes("Unauthorized"), `${relPath} should reject anonymous requests`);
   }
 });

@@ -66,11 +66,11 @@ test.afterEach(() => {
   tlsClient.fetch = originalTlsFetch;
 });
 
-test("proxy fetch fails closed when an invalid environment proxy is configured", async () => {
+test("proxy fetch bypasses invalid environment proxies for local addresses", async () => {
   await withHttpServer(
     (_req, res) => {
       res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("should-not-arrive");
+      res.end("local-bypass-ok");
     },
     async (url) => {
       await withEnv(
@@ -81,7 +81,10 @@ test("proxy fetch fails closed when an invalid environment proxy is configured",
           NO_PROXY: undefined,
         },
         async () => {
-          await assert.rejects(() => proxyFetch(url));
+          const response = await proxyFetch(url);
+
+          assert.equal(response.status, 200);
+          assert.equal(await response.text(), "local-bypass-ok");
         }
       );
     }
@@ -133,7 +136,7 @@ test("proxy fetch uses TLS fingerprint transport when enabled and available", as
 
       assert.equal(isTlsFingerprintActive(), true);
       assert.equal(tracked.tlsFingerprintUsed, true);
-      assert.deepEqual(await tracked.result.json(), { via: "tls-client" });
+      assert.deepEqual(await (tracked.result as any).json(), { via: "tls-client" });
     }
   );
 });

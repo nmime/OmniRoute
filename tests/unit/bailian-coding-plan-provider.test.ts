@@ -260,13 +260,22 @@ test("getStaticModelsForProvider returns models with correct structure", () => {
 });
 
 test("getStaticModelsForProvider returns undefined for non-static providers", () => {
-  // Test with providers that are NOT in STATIC_MODEL_PROVIDERS
-  const nonStaticProviders = ["openai", "anthropic", "deepseek", "groq", "unknown-provider"];
+  const nonStaticProviders = ["anthropic", "deepseek", "unknown-provider"];
 
   for (const provider of nonStaticProviders) {
     const models = getStaticModelsForProvider(provider);
     assert.equal(models, undefined, `Should return undefined for non-static provider: ${provider}`);
   }
+});
+
+test("getStaticModelsForProvider returns local image catalogs for image-only providers", () => {
+  const models = getStaticModelsForProvider("xai");
+
+  assert.ok(models, "xAI should expose local image models");
+  assert.deepEqual(
+    models.map((model) => model.id),
+    ["grok-imagine-image-quality", "grok-imagine-image"]
+  );
 });
 
 test("getStaticModelsForProvider returns models for other static providers", () => {

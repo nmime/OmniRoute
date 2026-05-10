@@ -1,26 +1,28 @@
-import os from "node:os";
+import {
+  ANTIGRAVITY_FALLBACK_VERSION,
+  getCachedAntigravityVersion,
+  resolveAntigravityVersion,
+} from "./antigravityVersion.ts";
 
 /**
- * Antigravity and Gemini CLI header utilities.
+ * Antigravity header utilities.
  *
  * Generates User-Agent strings and API client headers that match
- * the real Antigravity and Gemini CLI binaries.
+ * the real Antigravity client flows.
  *
  * Based on CLIProxyAPI's misc/header_utils.go.
  */
 
 type AntigravityHeaderProfile = "loadCodeAssist" | "fetchAvailableModels" | "models";
 
-const ANTIGRAVITY_VERSION = "1.21.9";
-const GEMINI_CLI_VERSION = "0.31.0";
-const GEMINI_SDK_VERSION = "1.41.0";
-const NODE_VERSION = "v22.19.0";
-const LOAD_CODE_ASSIST_USER_AGENT = "google-api-nodejs-client/9.15.1";
-const LOAD_CODE_ASSIST_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1";
+const ANTIGRAVITY_VERSION = ANTIGRAVITY_FALLBACK_VERSION;
+export const ANTIGRAVITY_CHROME_VERSION = "132.0.6834.160";
+export const ANTIGRAVITY_ELECTRON_VERSION = "39.2.3";
+export const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT = `vscode/1.X.X (Antigravity/${ANTIGRAVITY_FALLBACK_VERSION})`;
+export const ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT = "";
+export const ANTIGRAVITY_CREDIT_PROBE_API_CLIENT = "google-genai-sdk/1.30.0 gl-node/v22.21.1";
 const LOAD_CODE_ASSIST_METADATA = Object.freeze({
-  ideType: "IDE_UNSPECIFIED",
-  platform: "PLATFORM_UNSPECIFIED",
-  pluginType: "GEMINI",
+  ideType: "ANTIGRAVITY",
 });
 
 function withOptionalBearerAuth(
@@ -33,42 +35,21 @@ function withOptionalBearerAuth(
   return headers;
 }
 
-function getPlatform(): string {
-  const p = os.platform();
-  switch (p) {
-    case "win32":
-      return "win32";
-    case "darwin":
-      return "darwin";
-    default:
-      return p; // "linux", etc.
-  }
-}
-
-function getArch(): string {
-  const a = os.arch();
-  switch (a) {
-    case "x64":
-      return "x64";
-    case "ia32":
-      return "x86";
-    case "arm64":
-      return "arm64";
-    default:
-      return a;
-  }
-}
-
 /**
- * Antigravity User-Agent: "antigravity/VERSION darwin/arm64"
- *
- * Always claims darwin/arm64 regardless of actual server OS.
- * Real Antigravity is a macOS desktop tool — most users are on macOS.
- * Claiming linux/amd64 from a datacenter IP is MORE suspicious than
- * darwin/arm64. Matches CLIProxyAPI's proven production behavior.
+ * Antigravity desktop User-Agent:
+ * "Antigravity/VERSION (Macintosh; Intel Mac OS X 10_15_7) Chrome/132... Electron/39..."
  */
 export function antigravityUserAgent(): string {
-  return `antigravity/${ANTIGRAVITY_VERSION} darwin/arm64`;
+  return `Antigravity/${getCachedAntigravityVersion()} (Macintosh; Intel Mac OS X 10_15_7) Chrome/${ANTIGRAVITY_CHROME_VERSION} Electron/${ANTIGRAVITY_ELECTRON_VERSION}`;
+}
+
+export async function resolveAntigravityUserAgent(): Promise<string> {
+  const version = await resolveAntigravityVersion();
+  return `Antigravity/${version} (Macintosh; Intel Mac OS X 10_15_7) Chrome/${ANTIGRAVITY_CHROME_VERSION} Electron/${ANTIGRAVITY_ELECTRON_VERSION}`;
+}
+
+export function antigravityNativeOAuthUserAgent(): string {
+  return `vscode/1.X.X (Antigravity/${getCachedAntigravityVersion()})`;
 }
 
 export function getAntigravityLoadCodeAssistMetadata(): Record<string, string> {
@@ -88,9 +69,7 @@ export function getAntigravityHeaders(
       return withOptionalBearerAuth(
         {
           "Content-Type": "application/json",
-          "User-Agent": LOAD_CODE_ASSIST_USER_AGENT,
-          "X-Goog-Api-Client": LOAD_CODE_ASSIST_API_CLIENT,
-          "Client-Metadata": getAntigravityLoadCodeAssistClientMetadata(),
+          "User-Agent": antigravityNativeOAuthUserAgent(),
         },
         accessToken
       );
@@ -108,26 +87,9 @@ export function getAntigravityHeaders(
   }
 }
 
-/**
- * Gemini CLI User-Agent: "GeminiCLI/VERSION/MODEL (OS; ARCH)"
- * Example: "GeminiCLI/0.31.0/gemini-3-flash (darwin; arm64)"
- */
-export function geminiCLIUserAgent(model: string): string {
-  return `GeminiCLI/${GEMINI_CLI_VERSION}/${model || "unknown"} (${getPlatform()}; ${getArch()})`;
+/** X-Goog-Api-Client used by Antigravity's credit probe path. */
+export function getAntigravityCreditProbeApiClientHeader(): string {
+  return ANTIGRAVITY_CREDIT_PROBE_API_CLIENT;
 }
 
-/**
- * X-Goog-Api-Client header value matching the real Gemini SDK.
- * Example: "google-genai-sdk/1.41.0 gl-node/v22.19.0"
- */
-export function googApiClientHeader(): string {
-  return `google-genai-sdk/${GEMINI_SDK_VERSION} gl-node/${NODE_VERSION}`;
-}
-
-export {
-  ANTIGRAVITY_VERSION,
-  GEMINI_CLI_VERSION,
-  GEMINI_SDK_VERSION,
-  LOAD_CODE_ASSIST_USER_AGENT as ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT,
-  LOAD_CODE_ASSIST_API_CLIENT as ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT,
-};
+export { ANTIGRAVITY_VERSION };

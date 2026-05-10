@@ -2,6 +2,7 @@
 
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
+import { requireCliToolsAuth } from "@/lib/api/requireCliToolsAuth";
 import {
   getCliRuntimeStatus,
   CLI_TOOL_IDS,
@@ -52,6 +53,16 @@ async function checkToolConfigStatus(toolId: string): Promise<string> {
     switch (toolId) {
       case "claude":
         return config?.env?.ANTHROPIC_BASE_URL ? "configured" : "not_configured";
+      case "qwen":
+        // Check modelProviders for OmniRoute entries
+        const mp = config?.modelProviders;
+        if (!mp) return "not_configured";
+        const qwenConfigStr = JSON.stringify(mp).toLowerCase();
+        return qwenConfigStr.includes("omniroute") ||
+          qwenConfigStr.includes(`localhost:${apiPort}`) ||
+          qwenConfigStr.includes(`127.0.0.1:${apiPort}`)
+          ? "configured"
+          : "not_configured";
       case "droid":
       case "openclaw":
       case "cline":
@@ -89,7 +100,10 @@ async function checkToolConfigStatus(toolId: string): Promise<string> {
  * Returns runtime + config status for all CLI tools in one batch call.
  * Used by the CLI Tools page to show status badges in collapsed state.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const authError = await requireCliToolsAuth(request);
+  if (authError) return authError;
+
   try {
     const statuses = {};
 
@@ -128,7 +142,7 @@ export async function GET() {
     );
 
     // Check config status for installed+runnable tools via direct file reads
-    const settingsTools = ["claude", "codex", "droid", "openclaw", "cline", "kilo"];
+    const settingsTools = ["claude", "codex", "droid", "openclaw", "cline", "kilo", "qwen"];
 
     await Promise.all(
       settingsTools.map(async (toolId) => {

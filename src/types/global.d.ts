@@ -21,11 +21,13 @@ declare namespace NodeJS {
     PORT?: string;
     API_HOST?: string;
     DASHBOARD_PORT?: string;
+    OMNIROUTE_PUBLIC_BASE_URL?: string;
+    OMNIROUTE_CGPT_WEB_IMAGE_TIMEOUT_MS?: string;
+    OMNIROUTE_CGPT_WEB_IMAGE_CACHE_MAX_MB?: string;
     OMNIROUTE_BASE_URL?: string;
     OMNIROUTE_DISABLE_BACKGROUND_SERVICES?: string;
     OMNIROUTE_PORT?: string;
     PRICING_SYNC_ENABLED?: string;
-    REQUIRE_API_KEY?: string;
     NODE_ENV?: "development" | "production" | "test";
   }
 }
@@ -108,4 +110,13 @@ declare module "chalk" {
   }
   const chalk: ChalkInstance;
   export default chalk;
+}
+
+declare module "yazl" {
+  export class ZipFile {
+    addFile(realPath: string, metadataPath: string): void;
+    addBuffer(buffer: Buffer, metadataPath: string): void;
+    end(options?: Record<string, unknown>, callback?: () => void): void;
+    outputStream: NodeJS.ReadableStream;
+  }
 }

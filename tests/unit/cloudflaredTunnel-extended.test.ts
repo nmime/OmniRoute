@@ -47,7 +47,7 @@ async function readJsonFileWithRetry(filePath, attempts = 100) {
 
     try {
       return JSON.parse(trimmed);
-    } catch (error) {
+    } catch (error: any) {
       const snapshots = trimmed
         .split(/\n(?=\{)/)
         .map((entry) => entry.trim())
@@ -69,7 +69,7 @@ async function readJsonFileWithRetry(filePath, attempts = 100) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       return parseJsonSnapshot(await fs.readFile(filePath, "utf8"));
-    } catch (error) {
+    } catch (error: any) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -101,14 +101,19 @@ test.afterEach(async () => {
   restoreEnv();
 
   for (const dir of tempDirs) {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir as any, { recursive: true, force: true });
   }
   tempDirs.clear();
 });
 
 test("getCloudflaredRuntimeDirs and status resolve a managed binary from the data dir", async () => {
   const dataDir = await createCloudflaredDataDir("omniroute-cloudflared-managed-");
-  const binaryPath = path.join(dataDir, "cloudflared", "bin", "cloudflared");
+  const binaryPath = path.join(
+    dataDir,
+    "cloudflared",
+    "bin",
+    process.platform === "win32" ? "cloudflared.exe" : "cloudflared"
+  );
   process.env.DATA_DIR = dataDir;
 
   await fs.mkdir(path.dirname(binaryPath), { recursive: true });
@@ -135,17 +140,20 @@ test("getCloudflaredTunnelStatus resolves a PATH-installed binary when no manage
   const dataDir = await createCloudflaredDataDir("omniroute-cloudflared-path-");
   process.env.DATA_DIR = dataDir;
   delete process.env.CLOUDFLARED_BIN;
+  const lookupCommand = process.platform === "win32" ? "where" : "which";
+  const pathBinary =
+    process.platform === "win32" ? "C:\\Tools\\cloudflared.exe" : "/usr/local/bin/cloudflared";
 
   childProcess.execFile = (command, args, options, callback) => {
     const cb = typeof options === "function" ? options : callback;
-    assert.equal(command, "which");
+    assert.equal(command, lookupCommand);
     assert.deepEqual(args, ["cloudflared"]);
-    cb(null, "/usr/local/bin/cloudflared\n", "");
+    cb(null, `${pathBinary}\n`, "");
   };
   childProcess.execFile[promisify.custom] = async (command, args) => {
-    assert.equal(command, "which");
+    assert.equal(command, lookupCommand);
     assert.deepEqual(args, ["cloudflared"]);
-    return { stdout: "/usr/local/bin/cloudflared\n", stderr: "" };
+    return { stdout: `${pathBinary}\n`, stderr: "" };
   };
   syncBuiltinESMExports();
 
@@ -155,7 +163,7 @@ test("getCloudflaredTunnelStatus resolves a PATH-installed binary when no manage
   assert.equal(status.installed, true);
   assert.equal(status.managedInstall, false);
   assert.equal(status.installSource, "path");
-  assert.equal(status.binaryPath, "/usr/local/bin/cloudflared");
+  assert.equal(status.binaryPath, pathBinary);
   assert.equal(status.phase, "stopped");
 });
 
@@ -207,7 +215,12 @@ test("getCloudflaredTunnelStatus reports a starting tunnel while the spawned pid
 
 test("startCloudflaredTunnel reaches running state and stopCloudflaredTunnel clears persisted runtime state", async () => {
   const dataDir = await createCloudflaredDataDir("omniroute-cloudflared-run-");
-  const binaryPath = path.join(dataDir, "cloudflared", "bin", "cloudflared");
+  const binaryPath = path.join(
+    dataDir,
+    "cloudflared",
+    "bin",
+    process.platform === "win32" ? "cloudflared.exe" : "cloudflared"
+  );
   process.env.DATA_DIR = dataDir;
   process.env.API_PORT = "24128";
 

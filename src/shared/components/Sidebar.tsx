@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import PropTypes from "prop-types";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/shared/utils/cn";
 import { getActiveSidebarHref } from "@/shared/utils/sidebarRouteMatch";
-import { APP_CONFIG } from "@/shared/constants/config";
+import { APP_CONFIG } from "@/shared/constants/appConfig";
 import OmniRouteLogo from "./OmniRouteLogo";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
@@ -21,17 +20,19 @@ import {
 
 const isE2EMode = process.env.NEXT_PUBLIC_OMNIROUTE_E2E_MODE === "1";
 
+type SidebarProps = {
+  onClose?: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+  isMacElectron?: boolean;
+};
+
 export default function Sidebar({
   onClose,
   collapsed = false,
   onToggleCollapse,
   isMacElectron = false,
-}: {
-  onClose?: any;
-  collapsed?: boolean;
-  onToggleCollapse?: any;
-  isMacElectron?: boolean;
-}) {
+}: SidebarProps) {
   const pathname = usePathname();
   const t = useTranslations("sidebar");
   const tc = useTranslations("common");
@@ -192,7 +193,7 @@ export default function Sidebar({
     <>
       <aside
         className={cn(
-          "flex h-full min-h-0 flex-col border-r border-black/5 bg-vibrancy backdrop-blur-xl transition-all duration-300 ease-in-out dark:border-white/5",
+          "flex h-full min-h-0 flex-col border-r border-black/5 bg-sidebar transition-all duration-300 ease-in-out dark:border-white/5",
           collapsed ? "w-16" : "w-80"
         )}
         style={{
@@ -376,10 +377,3 @@ export default function Sidebar({
     </>
   );
 }
-
-Sidebar.propTypes = {
-  onClose: PropTypes.func,
-  collapsed: PropTypes.bool,
-  onToggleCollapse: PropTypes.func,
-  isMacElectron: PropTypes.bool,
-};

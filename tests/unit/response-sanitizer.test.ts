@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { extractThinkingFromContent, sanitizeOpenAIResponse, sanitizeStreamingChunk } =
-  await import("../../open-sse/handlers/responseSanitizer.ts");
+const {
+  extractThinkingFromContent,
+  sanitizeOpenAIResponse,
+  sanitizeResponsesApiResponse,
+  sanitizeStreamingChunk,
+} = await import("../../open-sse/handlers/responseSanitizer.ts");
 
 test("extractThinkingFromContent separates think blocks from visible content", () => {
   const parsed = extractThinkingFromContent(
@@ -51,12 +55,12 @@ test("sanitizeOpenAIResponse extracts thinking, collapses newlines, strips final
     ],
   });
 
-  assert.equal(sanitized.choices[0].index, 2);
-  assert.equal(sanitized.choices[0].finish_reason, "tool_calls");
-  assert.equal(sanitized.choices[0].message.content, "Hello\n\nworld");
-  assert.equal(sanitized.choices[0].message.reasoning_content, undefined);
-  assert.deepEqual(sanitized.choices[0].message.tool_calls, [{ id: "call_1" }]);
-  assert.deepEqual(sanitized.choices[0].message.function_call, { name: "legacy" });
+  assert.equal((sanitized as any).choices[0].index, 2);
+  assert.equal((sanitized as any).choices[0].finish_reason, "tool_calls");
+  (assert as any).equal((sanitized as any).choices[0].message.content, "Hello\n\nworld");
+  assert.equal((sanitized as any).choices[0].message.reasoning_content, undefined);
+  (assert as any).deepEqual((sanitized as any).choices[0].message.tool_calls, [{ id: "call_1" }]);
+  assert.deepEqual((sanitized as any).choices[0].message.function_call, { name: "legacy" });
 });
 
 test("sanitizeOpenAIResponse preserves native reasoning_content when no visible content remains", () => {
@@ -73,8 +77,8 @@ test("sanitizeOpenAIResponse preserves native reasoning_content when no visible 
     ],
   });
 
-  assert.equal(sanitized.choices[0].message.content, "");
-  assert.equal(sanitized.choices[0].message.reasoning_content, "provider reasoning");
+  assert.equal(((sanitized as any).choices[0].message as any).content, "");
+  assert.equal((sanitized as any).choices[0].message.reasoning_content, "provider reasoning");
 });
 
 test("sanitizeOpenAIResponse maps Claude-style usage fields and strips extras", () => {
@@ -89,7 +93,7 @@ test("sanitizeOpenAIResponse maps Claude-style usage fields and strips extras", 
     },
   });
 
-  assert.deepEqual(sanitized.usage, {
+  assert.deepEqual((sanitized as any).usage, {
     prompt_tokens: 11,
     completion_tokens: 7,
     total_tokens: 18,
@@ -114,7 +118,7 @@ test("sanitizeOpenAIResponse strips reasoning_details-derived reasoning_content 
     ],
   });
 
-  assert.equal(sanitized.choices[0].message.reasoning_content, undefined);
+  assert.equal((sanitized as any).choices[0].message.reasoning_content, undefined);
 });
 
 test("sanitizeOpenAIResponse keeps reasoning_details-derived reasoning_content for reasoning-only messages", () => {
@@ -134,7 +138,96 @@ test("sanitizeOpenAIResponse keeps reasoning_details-derived reasoning_content f
     ],
   });
 
-  assert.equal(sanitized.choices[0].message.reasoning_content, "first second");
+  assert.equal((sanitized as any).choices[0].message.reasoning_content, "first second");
+});
+
+test("sanitizeResponsesApiResponse converts chat completions tool calls into Responses output items", () => {
+  const sanitized = sanitizeResponsesApiResponse({
+    id: "chatcmpl_tool",
+    object: "chat.completion",
+    created: 123,
+    model: "gpt-4.1",
+    choices: [
+      {
+        index: 0,
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: "",
+          reasoning_content: "Check web results first.",
+          tool_calls: [
+            {
+              id: "call_web_search",
+              type: "function",
+              function: {
+                name: "omniroute_web_search",
+                arguments: '{"query":"omniroute"}',
+              },
+            },
+          ],
+        },
+      },
+    ],
+    usage: {
+      prompt_tokens: 12,
+      completion_tokens: 5,
+      prompt_tokens_details: { cached_tokens: 3 },
+      completion_tokens_details: { reasoning_tokens: 2 },
+    },
+  });
+
+  assert.equal((sanitized as any).object, "response");
+  assert.equal((sanitized as any).id, "resp_chatcmpl_tool");
+  assert.equal((sanitized as any).output[0].type, "reasoning");
+  (assert as any).equal((sanitized as any).output[1].type, "function_call");
+  (assert as any).equal((sanitized as any).output[1].call_id, "call_web_search");
+  (assert as any).equal((sanitized as any).output[1].name, "omniroute_web_search");
+  assert.equal((sanitized as any).usage.input_tokens, 12);
+  assert.equal(((sanitized as any).usage as any).output_tokens, 5);
+  assert.equal((sanitized as any).usage.input_tokens_details.cached_tokens, 3);
+  assert.equal((sanitized as any).usage.output_tokens_details.reasoning_tokens, 2);
+});
+
+test("sanitizeResponsesApiResponse preserves native Responses payloads and usage details", () => {
+  const sanitized = sanitizeResponsesApiResponse({
+    id: "resp_native",
+    object: "response",
+    created_at: 456,
+    model: "gpt-5.1-codex",
+    status: "completed",
+    output: [
+      {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Hello\n\n\nworld", annotations: [] }],
+      },
+      {
+        id: "fc_1",
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: { path: "/tmp/a" },
+      },
+    ],
+    usage: {
+      input_tokens: 20,
+      output_tokens: 7,
+      prompt_tokens_details: { cached_tokens: 4 },
+      cache_creation_input_tokens: 1,
+      completion_tokens_details: { reasoning_tokens: 3 },
+    },
+  });
+
+  assert.equal((sanitized as any).object, "response");
+  assert.equal(((sanitized as any).output[0] as any).content[0].text, "Hello\n\nworld");
+  assert.equal((sanitized as any).output[1].arguments, '{"path":"/tmp/a"}');
+  assert.equal((sanitized as any).output_text, "Hello\n\nworld");
+  assert.equal((sanitized as any).usage.input_tokens, 20);
+  (assert as any).equal((sanitized as any).usage.output_tokens, 7);
+  assert.equal((sanitized as any).usage.input_tokens_details.cached_tokens, 4);
+  assert.equal((sanitized as any).usage.input_tokens_details.cache_creation_tokens, 1);
+  assert.equal((sanitized as any).usage.output_tokens_details.reasoning_tokens, 3);
 });
 
 test("sanitizeStreamingChunk keeps only safe chunk fields and maps reasoning aliases", () => {
@@ -199,7 +292,21 @@ test("sanitizeStreamingChunk converts reasoning_details arrays in deltas", () =>
     ],
   });
 
-  assert.equal(sanitized.choices[0].delta.reasoning_content, "alphabeta");
+  assert.equal((sanitized as any).choices[0].delta.reasoning_content, "alphabeta");
+});
+
+test("sanitizeStreamingChunk preserves Copilot reasoning_text deltas", () => {
+  const sanitized = sanitizeStreamingChunk({
+    choices: [
+      {
+        delta: {
+          reasoning_text: "copilot reasoning",
+        },
+      },
+    ],
+  });
+
+  assert.equal((sanitized as any).choices[0].delta.reasoning_text, "copilot reasoning");
 });
 
 test("sanitize functions return non-object inputs unchanged", () => {
