@@ -15,9 +15,11 @@ import {
   HIDDEN_SIDEBAR_ITEMS_SETTING_KEY,
   SIDEBAR_SECTIONS,
   SIDEBAR_SETTINGS_UPDATED_EVENT,
+  getSectionItems,
   normalizeHiddenSidebarItems,
   type HideableSidebarItemId,
 } from "@/shared/constants/sidebarVisibility";
+import { PIN_PROVIDER_QUOTA_TO_HOME_KEY } from "@/shared/constants/homeWidgets";
 
 export default function AppearanceTab() {
   const { theme, setTheme, isDark } = useTheme();
@@ -39,6 +41,9 @@ export default function AppearanceTab() {
   const showCloudflaredTunnel = settings.hideEndpointCloudflaredTunnel !== true;
   const showTailscaleFunnel = settings.hideEndpointTailscaleFunnel !== true;
   const showNgrokTunnel = settings.hideEndpointNgrokTunnel !== true;
+  const pinProviderQuotaToHome = settings[PIN_PROVIDER_QUOTA_TO_HOME_KEY] === true;
+  const showQuickStartOnHome = settings.showQuickStartOnHome !== false; // default on
+  const showProviderTopologyOnHome = settings.showProviderTopologyOnHome !== false; // default on
 
   const getSettingsLabel = (key: string, fallback: string) =>
     typeof t.has === "function" && t.has(key) ? t(key) : fallback;
@@ -102,7 +107,7 @@ export default function AppearanceTab() {
         }
       }
     } catch (err) {
-      console.error(`Failed to update ${key}:`, err);
+      console.error("Failed to update", key, err);
     }
   };
 
@@ -148,7 +153,7 @@ export default function AppearanceTab() {
   ).map((section) => ({
     ...section,
     title: getSidebarLabel(section.titleKey, section.titleFallback),
-    items: section.items.map((item) => ({ ...item, label: tSidebar(item.i18nKey) })),
+    items: getSectionItems(section).map((item) => ({ ...item, label: tSidebar(item.i18nKey) })),
   }));
 
   const toggleSidebarItem = (itemId: HideableSidebarItemId) => {
@@ -384,6 +389,83 @@ export default function AppearanceTab() {
           </div>
         </div>
 
+        {/* Pin Information to Home Page section */}
+        <div className="pt-4 border-t border-border">
+          <div className="mb-3">
+            <p className="font-medium">
+              {getSettingsLabel("pinProviderQuotaToHome", "Pin Information to Home Page")}
+            </p>
+            <p className="text-sm text-text-muted">
+              Choose which sections to pin to the top of the Home page.
+            </p>
+          </div>
+
+          {/* Pinned options as a rounded table/list */}
+          <div className="rounded-lg border border-border bg-surface/40 overflow-hidden">
+            <div className="divide-y divide-border/70">
+              {/* Provider Quota Limits */}
+              <div className="flex items-start justify-between px-4 py-3">
+                <div>
+                  <p className="font-medium">
+                    {getSettingsLabel("providerQuotaLimits", "Provider Quota Limits")}
+                  </p>
+                  <p className="text-sm text-text-muted">
+                    {getSettingsLabel(
+                      "providerQuotaLimitsDesc",
+                      "Pin the Provider Quota status container (with Refresh All button) to the top of the Home page."
+                    )}
+                  </p>
+                </div>
+                <Toggle
+                  checked={pinProviderQuotaToHome}
+                  onChange={() => updateSetting(PIN_PROVIDER_QUOTA_TO_HOME_KEY, !pinProviderQuotaToHome)}
+                  disabled={loading}
+                />
+              </div>
+
+              {/* Quick Start */}
+              <div className="flex items-start justify-between px-4 py-3">
+                <div>
+                  <p className="font-medium">
+                    {getSettingsLabel("quickStart", "Quick Start")}
+                  </p>
+                  <p className="text-sm text-text-muted">
+                    {getSettingsLabel(
+                      "quickStartDesc",
+                      "Show the Quick Start panel on the Home page."
+                    )}
+                  </p>
+                </div>
+                <Toggle
+                  checked={showQuickStartOnHome}
+                  onChange={() => updateSetting("showQuickStartOnHome", !showQuickStartOnHome)}
+                  disabled={loading}
+                />
+              </div>
+
+              {/* Provider Topology */}
+              <div className="flex items-start justify-between px-4 py-3">
+                <div>
+                  <p className="font-medium">
+                    {getSettingsLabel("providerTopology", "Provider Topology")}
+                  </p>
+                  <p className="text-sm text-text-muted">
+                    {getSettingsLabel(
+                      "providerTopologyDesc",
+                      "Show the Provider Topology on the Home page."
+                    )}
+                  </p>
+                </div>
+                <Toggle
+                  checked={showProviderTopologyOnHome}
+                  onChange={() => updateSetting("showProviderTopologyOnHome", !showProviderTopologyOnHome)}
+                  disabled={loading}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="pt-4 border-t border-border">
           <div className="mb-3">
             <p className="font-medium">{t("sidebarVisibilityToggle")}</p>
@@ -491,7 +573,7 @@ export default function AppearanceTab() {
                 {(settings.customLogoUrl || settings.customLogoBase64) && (
                   <img
                     src={settings.customLogoBase64 || settings.customLogoUrl}
-                    alt="Logo preview"
+                    alt={t("appearanceLogoPreviewAlt")}
                     className="h-10 w-10 rounded border border-border object-contain bg-surface"
                     onError={(e) => {
                       e.currentTarget.style.display = "none";
@@ -561,7 +643,7 @@ export default function AppearanceTab() {
                   <p className="text-xs text-text-muted mb-2">{t("logoPreview")}</p>
                   <img
                     src={settings.customLogoBase64 || settings.customLogoUrl}
-                    alt="Logo preview"
+                    alt={t("appearanceLogoPreviewAlt")}
                     className="h-12 w-auto max-w-full rounded"
                   />
                 </div>
@@ -585,7 +667,7 @@ export default function AppearanceTab() {
                 {(settings.customFaviconUrl || settings.customFaviconBase64) && (
                   <img
                     src={settings.customFaviconBase64 || settings.customFaviconUrl}
-                    alt="Favicon preview"
+                    alt={t("appearanceFaviconPreviewAlt")}
                     className="h-10 w-10 rounded border border-border object-contain bg-surface"
                     onError={(e) => {
                       e.currentTarget.style.display = "none";
@@ -657,7 +739,7 @@ export default function AppearanceTab() {
                   <p className="text-xs text-text-muted mb-2">{t("faviconPreview")}</p>
                   <img
                     src={settings.customFaviconBase64 || settings.customFaviconUrl}
-                    alt="Favicon preview"
+                    alt={t("appearanceFaviconPreviewAlt")}
                     className="h-8 w-8 rounded"
                   />
                 </div>

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { getApiKeys } from "@/lib/db/apiKeys";
 import { getDbInstance } from "@/lib/db/core";
 
@@ -261,6 +262,9 @@ function computeActivityStreak(activityMap: Record<string, number>): number {
 }
 
 export async function GET(request: Request) {
+  const authError = await requireManagementAuth(request);
+  if (authError) return authError;
+
   try {
     const { searchParams } = new URL(request.url);
     const range = searchParams.get("range") || "30d";

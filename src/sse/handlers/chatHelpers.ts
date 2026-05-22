@@ -1,5 +1,6 @@
 import { getModelInfo, getComboForModel } from "../services/model";
 import { clearAccountError, markAccountUnavailable } from "../services/auth";
+import { connectionHasExtraKeys } from "@omniroute/open-sse/services/apiKeyRotator.ts";
 import * as log from "../utils/logger";
 import { updateProviderCredentials } from "../services/tokenRefresh";
 import {
@@ -25,6 +26,9 @@ import {
 } from "@omniroute/open-sse/utils/proxyFetch.ts";
 import { resolveProxyForConnection } from "@/lib/localDb";
 import { CircuitBreakerOpenError, getCircuitBreaker } from "../../shared/utils/circuitBreaker";
+import { classify429FromError, type FailureKind } from "../../shared/utils/classify429";
+import { resolveUseUpstream429BreakerHints } from "../../shared/utils/providerHints";
+
 import { logProxyEvent } from "../../lib/proxyLogger";
 import { logTranslationEvent } from "../../lib/translatorEvents";
 import { getRuntimeProviderProfile } from "@omniroute/open-sse/services/accountFallback.ts";
@@ -171,6 +175,17 @@ export async function resolveModelOrError(
   }
 
   if (!modelInfo.provider) {
+    // model_not_found: raised by resolveModelByProviderInference when no
+    // provider could be inferred — return a clear error instead of the
+    // misleading "openai" default that the old code silently fell back to.
+    if ((modelInfo as any).errorType === "model_not_found") {
+      const message =
+        (modelInfo as any).errorMessage ||
+        `Model '${modelStr}' could not be resolved to a known provider.`;
+      log.warn("CHAT", message, { model: modelStr });
+      return { error: errorResponse(HTTP_STATUS.BAD_REQUEST, message) };
+    }
+
     if ((modelInfo as any).errorType === "ambiguous_model") {
       // Family disambiguation: if the model name begins with a known
       // non-OAuth family prefix, auto-pick the family-native provider
@@ -204,9 +219,16 @@ export async function resolveModelOrError(
   }
 
   const { provider, model, extendedContext } = modelInfo;
+  // apiFormat: optional custom-model marker — see chatCore.ts for shape narrowing rationale.
+  const apiFormat: string | undefined =
+    modelInfo && typeof modelInfo === "object" && "apiFormat" in modelInfo
+      ? typeof (modelInfo as { apiFormat?: unknown }).apiFormat === "string"
+        ? ((modelInfo as { apiFormat?: string }).apiFormat as string)
+        : undefined
+      : undefined;
   const providerAlias = PROVIDER_ID_TO_ALIAS[provider] || provider;
   let targetFormat = getModelTargetFormat(providerAlias, model) || getTargetFormat(provider);
-  if ((modelInfo as any).apiFormat === "responses") {
+  if (apiFormat === "responses") {
     targetFormat = "openai-responses";
     log.info("ROUTING", `Custom model apiFormat=responses → targetFormat=openai-responses`);
   }
@@ -218,7 +240,7 @@ export async function resolveModelOrError(
     log.info("ROUTING", `Provider: ${provider}, Model: ${model}${ctxTag}`);
   }
 
-  return { provider, model, sourceFormat, targetFormat, extendedContext };
+  return { provider, model, sourceFormat, targetFormat, extendedContext, apiFormat };
 }
 
 export async function checkPipelineGates(
@@ -238,11 +260,25 @@ export async function checkPipelineGates(
 ) {
   const bypassReason = options.bypassReason || "pipeline override";
   const providerProfile = options.providerProfile ?? (await getRuntimeProviderProfile(provider));
+  // Issue #2100 follow-up: opt-in upstream 429 hint trust per provider.
+  const useHints429 = resolveUseUpstream429BreakerHints(
+    provider,
+    (providerProfile as { useUpstream429BreakerHints?: boolean }).useUpstream429BreakerHints
+  );
   const breaker = getCircuitBreaker(provider, {
     failureThreshold: providerProfile.failureThreshold ?? providerProfile.circuitBreakerThreshold,
     resetTimeout: providerProfile.resetTimeoutMs ?? providerProfile.circuitBreakerReset,
     onStateChange: (name: string, from: string, to: string) =>
       log.info("CIRCUIT", `${name}: ${from} → ${to}`),
+    ...(useHints429
+      ? {
+          cooldownByKind: {
+            rate_limit: 60_000,
+            quota_exhausted: 3_600_000,
+          } satisfies Partial<Record<FailureKind, number>>,
+          classifyError: classify429FromError,
+        }
+      : {}),
   });
   if (options.ignoreCircuitBreaker && !breaker.canExecute()) {
     log.info("CIRCUIT", `Bypassing OPEN circuit breaker for ${provider} (${bypassReason})`);
@@ -275,8 +311,10 @@ export async function executeChatWithBreaker({
   comboStepId,
   comboExecutionKey,
   extendedContext,
+  modelApiFormat,
   providerProfile,
   cachedSettings,
+  skipUpstreamRetry = false,
 }: any): Promise<{ result: any; tlsFingerprintUsed: boolean }> {
   let tlsFingerprintUsed = false;
 
@@ -285,7 +323,7 @@ export async function executeChatWithBreaker({
       runWithProxyContext(proxyInfo?.proxy || null, () =>
         (handleChatCore as any)({
           body: { ...body, model: `${provider}/${model}` },
-          modelInfo: { provider, model, extendedContext },
+          modelInfo: { provider, model, extendedContext, apiFormat: modelApiFormat },
           credentials: refreshedCredentials,
           log: handlerLog,
           clientRawRequest,
@@ -298,6 +336,7 @@ export async function executeChatWithBreaker({
           comboStepId,
           comboExecutionKey,
           cachedSettings,
+          skipUpstreamRetry,
           onCredentialsRefreshed: async (newCreds: any) => {
             await updateProviderCredentials(credentials.connectionId, {
               accessToken: newCreds.accessToken,
@@ -309,7 +348,8 @@ export async function executeChatWithBreaker({
               // apiKey blob mid-request — forward it so the DB credential
               // doesn't go stale after Set-Cookie rotation.
               apiKey: newCreds.apiKey,
-              testStatus: "active",
+              testStatus: newCreds.testStatus ?? "active",
+              isActive: newCreds.isActive,
             });
           },
           onRequestSuccess: async () => {
@@ -317,6 +357,21 @@ export async function executeChatWithBreaker({
           },
           onStreamFailure: async (failure: any) => {
             if (!credentials.connectionId) return;
+            // A3 guard: if 401 and connection has extra keys, skip connection-level disable
+            // (key-level failure already recorded in chatCore.ts via T07)
+            // Check extra keys directly from credentials for reliability across restarts
+            const extraKeys =
+              (credentials.providerSpecificData?.extraApiKeys as string[] | undefined) ?? [];
+            const hasExtraKeys =
+              extraKeys.length > 0 || connectionHasExtraKeys(credentials.connectionId);
+            const is401 = Number(failure?.status) === 401;
+            if (is401 && hasExtraKeys) {
+              log.debug(
+                "AUTH",
+                `A3 guard: skipping markAccountUnavailable for 401 with extra keys on ${credentials.connectionId.slice(0, 8)}`
+              );
+              return;
+            }
             await markAccountUnavailable(
               credentials.connectionId,
               Number(failure?.status || HTTP_STATUS.BAD_GATEWAY),
@@ -414,6 +469,24 @@ export function handleNoCredentials(
       credentials.retryAfter,
       credentials.retryAfterHuman
     );
+  }
+
+  if (credentials?.allExpired) {
+    // Every connection for this provider is in a terminal state (expired,
+    // banned, or credits_exhausted). Surface as 401 with a re-auth hint
+    // instead of the generic 400 "No credentials", so dashboards/CLIs can
+    // distinguish "never configured" from "needs to reconnect".
+    const status = credentials.expiredStatus || "expired";
+    const count = credentials.expiredCount || 1;
+    const reason =
+      status === "credits_exhausted"
+        ? "credits exhausted"
+        : status === "banned"
+          ? "banned by upstream"
+          : "authentication expired";
+    const message = `[${provider}] All ${count} connection(s) ${reason} — please reconnect in the dashboard`;
+    log.warn("CHAT", message);
+    return errorResponse(HTTP_STATUS.UNAUTHORIZED, message);
   }
   if (lastError && lastStatus) {
     log.warn("CHAT", "Preserving last upstream error after credential exhaustion", {

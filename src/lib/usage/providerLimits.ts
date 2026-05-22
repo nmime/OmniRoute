@@ -18,6 +18,10 @@ import { getMachineId } from "@/shared/utils/machine";
 import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 import { getExecutor } from "@omniroute/open-sse/executors/index.ts";
 import { getUsageForProvider } from "@omniroute/open-sse/services/usage.ts";
+import {
+  extractCodeAssistOnboardTierId,
+  extractCodeAssistSubscriptionTier,
+} from "@omniroute/open-sse/services/codeAssistSubscription.ts";
 import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -220,6 +224,44 @@ async function syncClaudeExtraUsageStateIfNeeded(
   };
 }
 
+/** Persist Antigravity tier from live loadCodeAssist on quota refresh (not only OAuth). */
+async function syncAntigravitySubscriptionIfNeeded(
+  connection: ProviderConnectionLike,
+  usage: JsonRecord
+): Promise<ProviderConnectionLike> {
+  if (connection.provider !== "antigravity") return connection;
+
+  const subscriptionInfo = usage.subscriptionInfo;
+  if (!subscriptionInfo) return connection;
+
+  const psd = (connection.providerSpecificData || {}) as JsonRecord;
+  const nextPsd: JsonRecord = { ...psd };
+  let changed = false;
+
+  const tierId = extractCodeAssistOnboardTierId(subscriptionInfo);
+  if (tierId && tierId !== "legacy-tier" && psd.tier !== tierId) {
+    nextPsd.tier = tierId;
+    changed = true;
+  }
+
+  const subscriptionTier = extractCodeAssistSubscriptionTier(subscriptionInfo);
+  if (subscriptionTier && psd.subscriptionTier !== subscriptionTier) {
+    nextPsd.subscriptionTier = subscriptionTier;
+    changed = true;
+  }
+
+  const plan = typeof usage.plan === "string" ? usage.plan.trim() : "";
+  if (plan && psd.plan !== plan) {
+    nextPsd.plan = plan;
+    changed = true;
+  }
+
+  if (!changed) return connection;
+
+  await updateProviderConnection(connection.id, { providerSpecificData: nextPsd });
+  return { ...connection, providerSpecificData: nextPsd };
+}
+
 /** Persist refreshed Claude bootstrap fields into psd; writes only on diff. */
 async function syncClaudeBootstrapIfNeeded(
   connection: ProviderConnectionLike,
@@ -298,7 +340,9 @@ async function fetchLiveProviderLimitsWithOptions(
   connection: ProviderConnectionLike;
   usage: JsonRecord;
 }> {
-  let connection = (await getProviderConnectionById(connectionId)) as ProviderConnectionLike | null;
+  let connection = (await getProviderConnectionById(
+    connectionId
+  )) as unknown as ProviderConnectionLike | null;
   if (!connection) {
     throw withStatus(new Error("Connection not found"), 404);
   }
@@ -315,6 +359,7 @@ async function fetchLiveProviderLimitsWithOptions(
     await syncExpiredStatusIfNeeded(connection, usage);
     connection = await syncClaudeExtraUsageStateIfNeeded(connection, usage);
     connection = await syncClaudeBootstrapIfNeeded(connection, usage);
+    connection = await syncAntigravitySubscriptionIfNeeded(connection, usage);
     return { connection, usage };
   }
 
@@ -375,6 +420,7 @@ async function fetchLiveProviderLimitsWithOptions(
   await syncExpiredStatusIfNeeded(connection, result.usage);
   connection = await syncClaudeExtraUsageStateIfNeeded(connection, result.usage);
   connection = await syncClaudeBootstrapIfNeeded(connection, result.usage);
+  connection = await syncAntigravitySubscriptionIfNeeded(connection, result.usage);
 
   return {
     connection,
@@ -436,7 +482,7 @@ export async function syncAllProviderLimits(
 }> {
   const { source = "manual", concurrency = 5 } = options;
   const connections = (
-    (await getProviderConnections({ isActive: true })) as ProviderConnectionLike[]
+    (await getProviderConnections({ isActive: true })) as unknown as ProviderConnectionLike[]
   ).filter(isSupportedUsageConnection);
   const cacheEntries: Array<{ connectionId: string; entry: ProviderLimitsCacheEntry }> = [];
   const caches: Record<string, ProviderLimitsCacheEntry> = {};

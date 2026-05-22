@@ -295,6 +295,21 @@ test("shouldMarkAccountExhaustedFrom429 skips connection poisoning for compatibl
   assert.equal(shouldMarkAccountExhaustedFrom429("claude", "claude-sonnet-4-6"), true);
 });
 
+test("shouldMarkAccountExhaustedFrom429 does not poison quota cache for transient 429s", () => {
+  assert.equal(
+    shouldMarkAccountExhaustedFrom429("kiro", "claude-opus-4.7", undefined, "rate_limit"),
+    false
+  );
+  assert.equal(
+    shouldMarkAccountExhaustedFrom429("kiro", "claude-opus-4.7", undefined, "transient"),
+    false
+  );
+  assert.equal(
+    shouldMarkAccountExhaustedFrom429("kiro", "claude-opus-4.7", undefined, "quota_exhausted"),
+    true
+  );
+});
+
 test("hasPerModelQuota returns true for GitHub Copilot provider (#1624)", () => {
   assert.equal(hasPerModelQuota("github"), true);
   assert.equal(hasPerModelQuota("github", "gpt-5.1-codex-max"), true);
@@ -758,4 +773,156 @@ test("recordModelLockoutFailure uses regular backoff for non-quota reasons", () 
     Date.now = originalNow;
     clearModelLock("modelscope", "test-conn-modelscope-2", "qwen/Qwen2.5-Coder-32B-Instruct");
   }
+});
+
+// Test for hour quota related error messages
+test("checkFallbackError classifies hour quota errors correctly", () => {
+  // For OAuth providers (e.g., codex), hour quota errors should be QUOTA_EXHAUSTED
+  const result1 = checkFallbackError(
+    429,
+    "Coding Plan hour quota has been exceeded",
+    0,
+    null,
+    "codex"
+  );
+  assert.equal(result1.shouldFallback, true);
+  assert.equal(result1.reason, RateLimitReason.QUOTA_EXHAUSTED);
+
+  const result2 = checkFallbackError(429, "hour quota exceeded", 0, null, "codex");
+  assert.equal(result2.shouldFallback, true);
+  assert.equal(result2.reason, RateLimitReason.QUOTA_EXHAUSTED);
+
+  const result3 = checkFallbackError(429, "Your hour quota is exceeded", 0, null, "codex");
+  assert.equal(result3.shouldFallback, true);
+  assert.equal(result3.reason, RateLimitReason.QUOTA_EXHAUSTED);
+
+  const result4 = checkFallbackError(429, "hour quota depleted", 0, null, "codex");
+  assert.equal(result4.shouldFallback, true);
+  assert.equal(result4.reason, RateLimitReason.QUOTA_EXHAUSTED);
+
+  // For API-key providers with 402 status, hour quota errors should be QUOTA_EXHAUSTED
+  const result5 = checkFallbackError(402, "hour quota has been exceeded", 0, null, "openai");
+  assert.equal(result5.shouldFallback, true);
+  assert.equal(result5.reason, RateLimitReason.QUOTA_EXHAUSTED);
+
+  const result6 = checkFallbackError(
+    403,
+    "Coding Plan hour quota has been exceeded",
+    0,
+    null,
+    "openai"
+  );
+  assert.equal(result6.shouldFallback, true);
+  assert.equal(result6.reason, RateLimitReason.QUOTA_EXHAUSTED);
+});
+
+// Test for classifyErrorText function with hour quota
+test("classifyErrorText handles hour quota messages", () => {
+  const { classifyErrorText } = accountFallback;
+
+  assert.equal(
+    classifyErrorText("Coding Plan hour quota has been exceeded"),
+    RateLimitReason.QUOTA_EXHAUSTED
+  );
+  assert.equal(classifyErrorText("hour quota exceeded"), RateLimitReason.QUOTA_EXHAUSTED);
+  assert.equal(classifyErrorText("Your hour quota is exceeded"), RateLimitReason.QUOTA_EXHAUSTED);
+  assert.equal(classifyErrorText("hour quota has been exceeded"), RateLimitReason.QUOTA_EXHAUSTED);
+  assert.equal(classifyErrorText("quota has been exceeded"), RateLimitReason.QUOTA_EXHAUSTED);
+});
+
+// ─── Model Access Denied (structured error codes + regex fallback) ─────
+
+test("checkFallbackError detects model access denied via structured error code (OpenAI)", () => {
+  const result = checkFallbackError(
+    400,
+    "The model `gpt-5` does not exist",
+    0,
+    null,
+    "openai",
+    null,
+    null,
+    { code: "model_not_found", type: null }
+  );
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, 0);
+  assert.equal(result.reason, RateLimitReason.MODEL_CAPACITY);
+});
+
+test("checkFallbackError detects model access denied via structured error type (Anthropic not_found_error)", () => {
+  const result = checkFallbackError(
+    400,
+    "model: claude-sonnet-4-7-20260515",
+    0,
+    null,
+    "anthropic",
+    null,
+    null,
+    { code: null, type: "not_found_error" }
+  );
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, 0);
+  assert.equal(result.reason, RateLimitReason.MODEL_CAPACITY);
+});
+
+test("checkFallbackError detects model access denied via structured error type (Anthropic permission_error) when the message confirms the model", () => {
+  const result = checkFallbackError(
+    400,
+    "you do not have access to the requested model",
+    0,
+    null,
+    "anthropic",
+    null,
+    null,
+    { code: null, type: "permission_error" }
+  );
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, 0);
+  assert.equal(result.reason, RateLimitReason.MODEL_CAPACITY);
+});
+
+test("checkFallbackError does NOT fallback on a permission_error that is a key/feature scope issue (not model access)", () => {
+  // permission_error is ambiguous on Anthropic — also raised for API-key scope,
+  // org restrictions and feature gating. Without a model-related message it must
+  // surface the real error instead of silently exhausting every combo target.
+  const result = checkFallbackError(
+    400,
+    "Your API key does not have permission to use the Message Batches API",
+    0,
+    null,
+    "anthropic",
+    null,
+    null,
+    { code: null, type: "permission_error" }
+  );
+  assert.equal(result.shouldFallback, false);
+});
+
+test("checkFallbackError detects model access denied via regex fallback (invalid model)", () => {
+  const result = checkFallbackError(
+    400,
+    "Invalid model: gpt-5-turbo",
+    0,
+    null,
+    "some-provider",
+    null,
+    null
+  );
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, 0);
+  assert.equal(result.reason, RateLimitReason.MODEL_CAPACITY);
+});
+
+test("checkFallbackError does NOT fallback on generic 400 without model access denied", () => {
+  const result = checkFallbackError(400, "bad request payload", 0, null, "openai", null, null);
+  assert.equal(result.shouldFallback, false);
+});
+
+test("checkFallbackError ignores structured error with unrelated code on 400", () => {
+  const result = checkFallbackError(400, "something went wrong", 0, null, "openai", null, null, {
+    code: "invalid_api_key",
+    type: null,
+  });
+  // "invalid_api_key" is not in MODEL_ACCESS_DENIED_CODES,
+  // no MODEL_ACCESS_DENIED_PATTERNS match either → shouldFallback: false
+  assert.equal(result.shouldFallback, false);
 });
