@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   actualize:
@@ -16,7 +17,7 @@ jobs:
     timeout-minutes: 15
     env:
       GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.BRANCH_LOCK_TOKEN || secrets.GITHUB_TOKEN }}
       BUNDLE_URL: https://splox.s3.amazonaws.com/11d13cc6-5a21-4d99-a5cf-84b5e99b4ee9_omniroute-fork-sync-20260522T053919Z.bundle
       BUNDLE_REF: refs/heads/sync/fork-main-actualized-v3.8.2-20260522T053919Z
       SYNC_SHA: 613d16351dc3c6bbb13b21b4856ac85032d955b6
