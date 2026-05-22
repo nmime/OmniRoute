@@ -1,0 +1,57 @@
+name: Actualize fork from deployment bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/actualize-fork-from-bundle.yml
+
+permissions:
+  contents: write
+
+jobs:
+  actualize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      BUNDLE_URL: https://splox.s3.amazonaws.com/11d13cc6-5a21-4d99-a5cf-84b5e99b4ee9_omniroute-fork-sync-20260522T053919Z.bundle
+      BUNDLE_REF: refs/heads/sync/fork-main-actualized-v3.8.2-20260522T053919Z
+      SYNC_SHA: 613d16351dc3c6bbb13b21b4856ac85032d955b6
+      TARGET_BRANCH: sync/fork-main-actualized-v3.8.2-20260522T053919Z
+      TEMP_AUTOMATION_BRANCH: automation/actualize-fork-v3.8.2-20260522T053919Z
+    steps:
+      - name: Import deployed tree and fast-forward fork main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init work
+          cd work
+          git config --global --add safe.directory "$PWD"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          current_main="$(git rev-parse refs/remotes/origin/main)"
+          echo "current_main=${current_main}"
+          curl -fsSL "${BUNDLE_URL}" -o /tmp/omniroute-fork-sync.bundle
+          git bundle verify /tmp/omniroute-fork-sync.bundle
+          git fetch /tmp/omniroute-fork-sync.bundle "${BUNDLE_REF}:refs/remotes/bundle/fork-sync"
+          imported="$(git rev-parse refs/remotes/bundle/fork-sync)"
+          echo "imported=${imported}"
+          if [ "${imported}" != "${SYNC_SHA}" ]; then
+            echo "::error::bundle imported ${imported}; expected ${SYNC_SHA}."
+            exit 11
+          fi
+          final_sha="$(git commit-tree "${SYNC_SHA}^{tree}" -p "${SYNC_SHA}" -p "${current_main}" -m "chore(sync): actualize fork with deployed v3.8.2" -m "Preserve fork main history and make the tree match deploy/omniroute-latest-custom (${SYNC_SHA}).")"
+          echo "final_sha=${final_sha}"
+          if ! git merge-base --is-ancestor "${current_main}" "${final_sha}"; then
+            echo "::error::final commit is not a fast-forward from current main."
+            exit 12
+          fi
+          git push origin "${final_sha}:refs/heads/${TARGET_BRANCH}"
+          git push origin "${final_sha}:refs/heads/main"
+          git push origin --delete "${TEMP_AUTOMATION_BRANCH}" || true
+          echo "Fork actualized: main=${final_sha}; branch=${TARGET_BRANCH}"
