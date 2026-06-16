@@ -8,8 +8,8 @@
  *
  *   - PUBLIC      — explicitly safe routes (login, logout, status, health,
  *                   onboarding bootstrap).
- *   - CLIENT_API  — model-serving and OpenAI/Anthropic-compatible endpoints
- *                   protected by API keys.
+ *   - CLIENT_API  — model-serving and OpenAI/Anthropic-compatible mutating
+ *                   endpoints protected by API keys.
  *   - MANAGEMENT  — dashboard pages, settings, providers, keys, admin and
  *                   diagnostics endpoints protected by dashboard session
  *                   or management-grade credentials.

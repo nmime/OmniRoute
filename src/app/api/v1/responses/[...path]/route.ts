@@ -1,5 +1,6 @@
 import { handleChat } from "@/sse/handlers/chat";
 import { initTranslators } from "@omniroute/open-sse/translator/index.ts";
+import { requireClientApiAuth } from "@/server/authz/requireClientApiAuth";
 
 let initialized = false;
 
@@ -26,6 +27,9 @@ export async function OPTIONS() {
  * arbitrary Responses suffixes all the way to the upstream provider.
  */
 export async function POST(request) {
+  const authRejection = await requireClientApiAuth(request);
+  if (authRejection) return authRejection;
+
   await ensureInitialized();
   return await handleChat(request);
 }

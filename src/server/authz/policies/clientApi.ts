@@ -1,6 +1,7 @@
 import { isDashboardSessionAuthenticated } from "@/shared/utils/apiAuth.ts";
 import { isRequireApiKeyEnabled } from "@/shared/utils/featureFlags";
 import { extractApiKey } from "@/sse/services/auth.ts";
+import { getApiKeyMetadata, validateApiKey } from "@/lib/db/apiKeys";
 import type { AuthOutcome, PolicyContext, RoutePolicy } from "../context";
 import { allow, reject } from "../context";
 
@@ -32,6 +33,14 @@ function maskKeyId(apiKey: string): string {
   return `key_${tail}`;
 }
 
+function isProviderBackedPostEndpoint(path: string, method: string): boolean {
+  if (String(method).toUpperCase() !== "POST") return false;
+  if (path === "/api/v1/responses" || path.startsWith("/api/v1/responses/")) return true;
+  if (path === "/api/v1/chat/completions") return true;
+  if (/^\/api\/v1\/providers\/[^/]+\/chat\/completions\/?$/.test(path)) return true;
+  return false;
+}
+
 export const clientApiPolicy: RoutePolicy = {
   routeClass: "CLIENT_API",
   async evaluate(ctx: PolicyContext): Promise<AuthOutcome> {
@@ -41,32 +50,41 @@ export const clientApiPolicy: RoutePolicy = {
         return allow({ kind: "dashboard_session", id: "dashboard" });
       }
 
-      if (!isRequireApiKeyEnabled()) {
-        return allow({ kind: "anonymous", id: "local" });
+      if (!isProviderBackedPostEndpoint(ctx.classification.normalizedPath, ctx.request.method)) {
+        if (!isRequireApiKeyEnabled()) {
+          return allow({ kind: "anonymous", id: "local" });
+        }
       }
 
       return reject(401, "AUTH_002", "Authentication required");
     }
 
-    const { validateApiKey } = await import("../../../lib/db/apiKeys");
     const ok = await validateApiKey(bearer);
-    if (!ok) {
+    const apiKeyInfo = ok ? await getApiKeyMetadata(bearer) : null;
+    if (!ok || !apiKeyInfo) {
       // Issue #2257: when REQUIRE_API_KEY is off, a stale CLI config (Codex
       // Desktop auto-config, Hermes, etc.) carrying an invalid Bearer
       // shouldn't 401 the whole request — REQUIRE_API_KEY=false means
       // "anonymous traffic is allowed", so an invalid key should degrade to
       // anonymous instead of rejecting. We log a warning so the bad key is
       // still observable in the request log.
-      if (!isRequireApiKeyEnabled()) {
-        console.warn(
-          `[clientApiPolicy] invalid bearer presented to ${ctx.classification.normalizedPath} ` +
-            `but REQUIRE_API_KEY=false — falling through to anonymous (key_id=${maskKeyId(bearer)})`
-        );
-        return allow({ kind: "anonymous", id: "local" });
+      if (!isProviderBackedPostEndpoint(ctx.classification.normalizedPath, ctx.request.method)) {
+        if (!isRequireApiKeyEnabled()) {
+          console.warn(
+            `[clientApiPolicy] invalid bearer presented to ${ctx.classification.normalizedPath} ` +
+              `but REQUIRE_API_KEY=false — falling through to anonymous (key_id=${maskKeyId(bearer)})`
+          );
+          return allow({ kind: "anonymous", id: "local" });
+        }
       }
       return reject(401, "AUTH_002", "Invalid API key");
     }
 
-    return allow({ kind: "client_api_key", id: maskKeyId(bearer) });
+    return allow({
+      kind: "client_api_key",
+      id: apiKeyInfo.id || maskKeyId(bearer),
+      label: apiKeyInfo.name || undefined,
+      scopes: apiKeyInfo.scopes || [],
+    });
   },
 };

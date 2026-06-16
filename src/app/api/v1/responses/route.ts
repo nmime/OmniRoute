@@ -5,6 +5,7 @@ import { resolveResponsesApiModel } from "@/app/api/internal/codex-responses-ws/
 import { getModelInfo } from "@/sse/services/model";
 import { getComboByName } from "@/lib/db/combos";
 import { resolveKeepaliveThreshold } from "@omniroute/open-sse/utils/keepaliveThreshold";
+import { requireClientApiAuth } from "@/server/authz/requireClientApiAuth";
 
 // NOTE: We do NOT call initTranslators() here — the translator registry is
 // bootstrapped at module level inside open-sse/translator/index.ts when it
@@ -74,10 +75,12 @@ async function postHandler(request, context) {
     // to produce the first byte, so use a longer keepalive threshold (15s vs 2s).
     let model;
     try {
-      const body = await resolved.clone().json().catch(() => null);
+      const body = await resolved
+        .clone()
+        .json()
+        .catch(() => null);
       model = body?.model;
-    } catch {
-    }
+    } catch {}
     const thresholdMs = resolveKeepaliveThreshold(model);
     return await withEarlyStreamKeepalive(handleChat(resolved), {
       signal: request.signal,
@@ -87,4 +90,10 @@ async function postHandler(request, context) {
   return await handleChat(resolved);
 }
 
-export const POST = withInjectionGuard(postHandler);
+const guardedPostHandler = withInjectionGuard(postHandler);
+
+export async function POST(request, context) {
+  const authRejection = await requireClientApiAuth(request);
+  if (authRejection) return authRejection;
+  return guardedPostHandler(request, context);
+}

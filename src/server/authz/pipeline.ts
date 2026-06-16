@@ -215,19 +215,6 @@ export async function runAuthzPipeline(
     return response;
   }
 
-  if (guardedPathname.startsWith("/api/") && method !== "GET" && method !== "OPTIONS") {
-    const bodySizeSettings = await getBodySizeSettings();
-    const bodySizeRejection = checkBodySize(
-      request,
-      getBodySizeLimit(guardedPathname, bodySizeSettings)
-    );
-    if (bodySizeRejection) {
-      stampRouteResponse(bodySizeRejection, requestId, classification.routeClass);
-      applyCorsHeaders(bodySizeRejection, request);
-      return bodySizeRejection;
-    }
-  }
-
   const requestHeaders = new Headers(request.headers);
   for (const trusted of AUTHZ_TRUSTED_HEADERS) {
     requestHeaders.delete(trusted);
@@ -246,7 +233,10 @@ export async function runAuthzPipeline(
   requestHeaders.set(
     AUTHZ_HEADER_PEER_LOCALITY,
     classifyHostLocality(
-      resolveStampedPeer(request.headers.get(PEER_IP_HEADER), process.env.OMNIROUTE_PEER_STAMP_TOKEN)
+      resolveStampedPeer(
+        request.headers.get(PEER_IP_HEADER),
+        process.env.OMNIROUTE_PEER_STAMP_TOKEN
+      )
     )
   );
 
@@ -277,6 +267,19 @@ export async function runAuthzPipeline(
     const rejection = rejectionResponse(outcome, classification, requestId);
     applyCorsHeaders(rejection, request);
     return rejection;
+  }
+
+  if (guardedPathname.startsWith("/api/") && method !== "GET" && method !== "OPTIONS") {
+    const bodySizeSettings = await getBodySizeSettings();
+    const bodySizeRejection = checkBodySize(
+      request,
+      getBodySizeLimit(guardedPathname, bodySizeSettings)
+    );
+    if (bodySizeRejection) {
+      stampRouteResponse(bodySizeRejection, requestId, classification.routeClass);
+      applyCorsHeaders(bodySizeRejection, request);
+      return bodySizeRejection;
+    }
   }
 
   stampSubject(requestHeaders, outcome.subject);
