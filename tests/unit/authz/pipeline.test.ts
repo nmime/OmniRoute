@@ -179,9 +179,9 @@ test("runAuthzPipeline keeps management API rejections as JSON", async () => {
   assert.equal(body.error.code, "AUTH_001");
 });
 
-test("runAuthzPipeline rejects oversized API bodies before auth", async () => {
+test("runAuthzPipeline rejects oversized API bodies after auth allows local-mode clients", async () => {
   const response = await pipeline.runAuthzPipeline(
-    request("http://localhost/api/v1/chat/completions", {
+    request("http://localhost/api/v1/embeddings", {
       method: "POST",
       headers: {
         "content-length": String(99 * 1024 * 1024),
@@ -200,9 +200,9 @@ test("runAuthzPipeline rejects oversized API bodies before auth", async () => {
   );
 });
 
-test("runAuthzPipeline rejects oversized rewritten alias API bodies before auth", async () => {
+test("runAuthzPipeline rejects oversized rewritten alias API bodies after auth allows local-mode clients", async () => {
   const response = await pipeline.runAuthzPipeline(
-    request("http://localhost/v1/chat/completions", {
+    request("http://localhost/v1/embeddings", {
       method: "POST",
       headers: {
         "content-length": String(99 * 1024 * 1024),
@@ -253,7 +253,7 @@ test("runAuthzPipeline allows dashboard sessions to read model catalog aliases",
   );
 
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("x-omniroute-route-class"), "CLIENT_API");
+  assert.equal(response.headers.get("x-omniroute-route-class"), "PUBLIC");
 });
 
 test("runAuthzPipeline allows dashboard sessions to reach DB health management API", async () => {
@@ -331,4 +331,62 @@ test("runAuthzPipeline refreshes dashboard JWTs near expiry", async () => {
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("set-cookie") || "", /auth_token=/);
+});
+
+test("runAuthzPipeline rejects unauthenticated OpenAI-compatible POSTs before body checks", async () => {
+  await forceAuthRequired();
+
+  for (const path of ["/v1/responses", "/responses", "/v1/chat/completions", "/chat/completions"]) {
+    const response = await pipeline.runAuthzPipeline(
+      request(`http://localhost${path}`, {
+        method: "POST",
+        headers: {
+          "content-length": String(99 * 1024 * 1024),
+          "content-type": "application/json",
+        },
+      }),
+      { enforce: true }
+    );
+
+    assert.equal(response.status, 401, `${path} must fail with auth before body validation`);
+    assert.equal(response.headers.get("x-omniroute-route-class"), "CLIENT_API");
+    const body = await response.json();
+    assert.equal(body.error.code, "AUTH_002");
+  }
+});
+
+test("runAuthzPipeline allows public model catalog GET while POST remains client API", async () => {
+  await forceAuthRequired();
+
+  const getResponse = await pipeline.runAuthzPipeline(
+    request("http://localhost/v1/models", { method: "GET" }),
+    { enforce: true }
+  );
+  assert.equal(getResponse.status, 200);
+  assert.equal(getResponse.headers.get("x-omniroute-route-class"), "PUBLIC");
+
+  const postResponse = await pipeline.runAuthzPipeline(
+    request("http://localhost/v1/models", { method: "POST" }),
+    { enforce: true }
+  );
+  assert.equal(postResponse.status, 200);
+  assert.equal(postResponse.headers.get("x-omniroute-route-class"), "CLIENT_API");
+});
+
+test("runAuthzPipeline stamps validated API key id/name for downstream call logs", async () => {
+  await forceAuthRequired();
+  const created = await apiKeysDb.createApiKey("pipeline-key", "machine-test-1234");
+  assert.ok(created?.key, "createApiKey must return a key");
+
+  const response = await pipeline.runAuthzPipeline(
+    request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${created.key}` },
+    }),
+    { enforce: true }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-omniroute-route-class"), "CLIENT_API");
+  assert.equal(response.headers.get("x-middleware-next"), "1");
 });

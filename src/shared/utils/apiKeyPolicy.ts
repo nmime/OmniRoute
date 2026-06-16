@@ -283,6 +283,22 @@ export interface ApiKeyPolicyResult {
  *  test the policy for (never the key secret). */
 const PLAYGROUND_KEY_ID_HEADER = "x-omniroute-playground-key-id";
 
+function extractClientApiKey(request: Request): string | null {
+  const authHeader = request.headers.get("authorization") || request.headers.get("Authorization");
+  if (authHeader) {
+    const trimmed = authHeader.trim();
+    if (trimmed.toLowerCase().startsWith("bearer ")) {
+      const token = trimmed.slice(7).trim();
+      if (token) return token;
+    }
+  }
+
+  const xApiKey = request.headers.get("x-api-key") || request.headers.get("X-Api-Key");
+  if (xApiKey?.trim()) return xApiKey.trim();
+
+  return extractApiKey(request);
+}
+
 /**
  * Dashboard playground support. An authenticated admin session may test a
  * specific API key's policy (allowed_models, budget, …) WITHOUT putting the key
@@ -311,7 +327,7 @@ export async function enforceApiKeyPolicy(
 ): Promise<ApiKeyPolicyResult> {
   // A real bearer key wins; otherwise an authenticated dashboard playground may
   // test a specific key's policy by id (resolved server-side, secret never sent).
-  const apiKey = extractApiKey(request) || (await resolvePlaygroundTestKey(request));
+  const apiKey = extractClientApiKey(request) || (await resolvePlaygroundTestKey(request));
 
   // No API key = local/session mode, skip policy checks
   if (!apiKey) {

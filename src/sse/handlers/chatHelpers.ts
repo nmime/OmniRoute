@@ -37,6 +37,11 @@ import { resolveUseUpstream429BreakerHints } from "../../shared/utils/providerHi
 import { logProxyEvent } from "../../lib/proxyLogger";
 import { logTranslationEvent } from "../../lib/translatorEvents";
 import { getRuntimeProviderProfile } from "@omniroute/open-sse/services/accountFallback.ts";
+import {
+  AUTHZ_HEADER_AUTH_ID,
+  AUTHZ_HEADER_AUTH_KIND,
+  AUTHZ_HEADER_AUTH_LABEL,
+} from "@/server/authz/headers";
 
 // Models that explicitly cannot run on the codex/ChatGPT-Pro OAuth pool — when
 // a caller writes `codex/deepseek-v4-pro` we transparently reroute to the
@@ -69,6 +74,24 @@ function getHeaderValue(headers: Record<string, unknown> | null | undefined, nam
     return Array.isArray(value) ? value.join(",") : String(value ?? "");
   }
   return "";
+}
+
+function apiKeyInfoFromTrustedAuthHeaders(
+  headers: Record<string, unknown> | null | undefined
+): { id: string; name?: string } | null {
+  if (getHeaderValue(headers, AUTHZ_HEADER_AUTH_KIND) !== "client_api_key") return null;
+  const id = getHeaderValue(headers, AUTHZ_HEADER_AUTH_ID).trim();
+  if (!id) return null;
+  const name = getHeaderValue(headers, AUTHZ_HEADER_AUTH_LABEL).trim();
+  return name ? { id, name } : { id };
+}
+
+function mergeTrustedApiKeyInfo(
+  apiKeyInfo: Record<string, unknown> | null | undefined,
+  clientHeaders: Record<string, unknown> | null | undefined
+): Record<string, unknown> | null | undefined {
+  if (apiKeyInfo?.id) return apiKeyInfo;
+  return apiKeyInfoFromTrustedAuthHeaders(clientHeaders) ?? apiKeyInfo;
 }
 
 function isCodexNativeResponsesRequest(
@@ -397,7 +420,7 @@ export async function executeChatWithBreaker({
           log: handlerLog,
           clientRawRequest,
           connectionId: credentials.connectionId,
-          apiKeyInfo,
+          apiKeyInfo: mergeTrustedApiKeyInfo(apiKeyInfo, clientRawRequest?.headers),
           userAgent,
           comboName,
           comboStrategy,
