@@ -39,6 +39,15 @@ export interface AccountSemaphoreStatsEntry {
   blockedUntil: string | null;
 }
 
+export type TryAcquireAccountSemaphoreReason = "acquired" | "bypassed" | "full" | "blocked";
+
+export interface TryAcquireAccountSemaphoreResult {
+  acquired: boolean;
+  release: () => void;
+  reason: TryAcquireAccountSemaphoreReason;
+  snapshot: AccountSemaphoreStatsEntry;
+}
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_QUEUE_SIZE = 20;
 
@@ -171,12 +180,81 @@ function createSemaphoreTimeoutError(
   return error;
 }
 
+function snapshotGate(gate: AccountGate): AccountSemaphoreStatsEntry {
+  return {
+    running: gate.running,
+    queued: gate.queue.length,
+    maxConcurrency: gate.maxConcurrency,
+    blockedUntil: gate.blockedUntil ? new Date(gate.blockedUntil).toISOString() : null,
+  };
+}
+
+function createBypassedSnapshot(): AccountSemaphoreStatsEntry {
+  return {
+    running: 0,
+    queued: 0,
+    maxConcurrency: 0,
+    blockedUntil: null,
+  };
+}
+
+
 function makeAbortError(signal: AbortSignal): Error {
   const reason = signal.reason;
   if (reason instanceof Error) return reason;
   const err = new Error(typeof reason === "string" ? reason : "The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+/**
+ * Try to acquire a slot without queueing.
+ *
+ * This is intended for routing paths that can choose another eligible account
+ * when the selected account is already at local capacity. It never creates a
+ * waiter and never waits for DEFAULT_TIMEOUT_MS.
+ */
+export function tryAcquire(
+  semaphoreKey: string,
+  { maxConcurrency = null }: Pick<AcquireAccountSemaphoreOptions, "maxConcurrency"> = {}
+): TryAcquireAccountSemaphoreResult {
+  if (isBypassed(maxConcurrency)) {
+    return {
+      acquired: true,
+      release: createNoopReleaseFn(),
+      reason: "bypassed",
+      snapshot: createBypassedSnapshot(),
+    };
+  }
+
+  const gate = ensureGate(semaphoreKey, maxConcurrency);
+  clearCleanupTimer(gate);
+
+  const blocked = isBlocked(gate);
+  if (!blocked && gate.running < gate.maxConcurrency) {
+    gate.running++;
+    return {
+      acquired: true,
+      release: createReleaseFn(semaphoreKey),
+      reason: "acquired",
+      snapshot: snapshotGate(gate),
+    };
+  }
+
+  return {
+    acquired: false,
+    release: createNoopReleaseFn(),
+    reason: blocked ? "blocked" : "full",
+    snapshot: snapshotGate(gate),
+  };
+}
+
+/**
+ * Return one semaphore key snapshot without mutating the gate map.
+ */
+export function getSnapshot(semaphoreKey: string): AccountSemaphoreStatsEntry | null {
+  const gate = gates.get(semaphoreKey);
+  return gate ? snapshotGate(gate) : null;
 }
 
 /**
@@ -331,12 +409,7 @@ export function getStats(): Record<string, AccountSemaphoreStatsEntry> {
   const stats: Record<string, AccountSemaphoreStatsEntry> = {};
 
   for (const [key, gate] of gates) {
-    stats[key] = {
-      running: gate.running,
-      queued: gate.queue.length,
-      maxConcurrency: gate.maxConcurrency,
-      blockedUntil: gate.blockedUntil ? new Date(gate.blockedUntil).toISOString() : null,
-    };
+    stats[key] = snapshotGate(gate);
   }
 
   return stats;

@@ -288,6 +288,16 @@ export function getCodexUpstreamModel(model: unknown): string {
  * Ref: https://community.openai.com/t/caching-is-borked-for-gpt-5-models/1359574
  * Ref: https://community.openai.com/t/no-caching-with-model-responses/1338627
  */
+function coerceScalarCodexResponsesInput(body: Record<string, unknown>): void {
+  if (typeof body.input !== "string") return;
+  body.input = [
+    {
+      role: "user",
+      content: [{ type: "input_text", text: body.input }],
+    },
+  ];
+}
+
 function convertSystemToDeveloperRole(body: Record<string, unknown>): void {
   if (!Array.isArray(body.input)) return;
 
@@ -1171,6 +1181,7 @@ export class CodexExecutor extends BaseExecutor {
     const thinkingBudgetConfig = getThinkingBudgetConfig();
     const allowConnectionReasoningDefaults = thinkingBudgetConfig.mode === ThinkingMode.PASSTHROUGH;
     consumeResponsesStoreMarker(body);
+    coerceScalarCodexResponsesInput(body);
 
     // Codex /responses rejects stream=false, but /responses/compact rejects the stream field entirely.
     if (isCompactRequest) {

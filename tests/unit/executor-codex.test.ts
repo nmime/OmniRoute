@@ -1276,3 +1276,18 @@ test("Codex internal websocket bridge rejects non-object JSON payloads", async (
     assert.match(body.error.message, /JSON object/);
   });
 });
+
+
+test("CodexExecutor.transformRequest coerces scalar Responses input to input_text items", () => {
+  const executor = new CodexExecutor();
+  const transformed = executor.transformRequest(
+    "gpt-5.5",
+    { model: "gpt-5.5", input: "hello codex", stream: true },
+    true,
+    { requestEndpointPath: "/responses" }
+  ) as Record<string, unknown>;
+
+  assert.deepEqual(transformed.input, [
+    { role: "user", content: [{ type: "input_text", text: "hello codex" }] },
+  ]);
+});

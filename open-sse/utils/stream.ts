@@ -93,6 +93,7 @@ type StreamCompletePayload = {
   responseBody?: unknown;
   providerPayload?: unknown;
   clientPayload?: unknown;
+  ttft?: number;
 };
 
 type StreamFailurePayload = {
@@ -670,6 +671,8 @@ export function createSSEStream(options: StreamOptions = {}) {
   let passthroughResponsesCurrentFunctionCallKey: string | null = null;
   const passthroughResponsesReasoningSummarySeen = new Set<string>();
   const streamStartedAt = Date.now();
+  let firstChunkAt: number | null = null;
+  const getTtftMs = () => (firstChunkAt === null ? 0 : Math.max(0, firstChunkAt - streamStartedAt));
 
   let lastToolCallChunkTime: number | null = null;
   let toolFinishTime: number | null = null;
@@ -1073,7 +1076,9 @@ export function createSSEStream(options: StreamOptions = {}) {
 
       transform(chunk, controller) {
         if (streamTimedOut) return;
-        lastChunkTime = Date.now();
+        const chunkReceivedAt = Date.now();
+        lastChunkTime = chunkReceivedAt;
+        if (firstChunkAt === null) firstChunkAt = chunkReceivedAt;
         const text = decoder.decode(chunk, { stream: true });
         buffer += text;
         reqLogger?.appendProviderChunk?.(text);
@@ -2270,6 +2275,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                   clientPayload: clientPayloadCollector.build(responseBody, {
                     includeEvents: false,
                   }),
+                  ttft: getTtftMs(),
                 });
               } catch {}
             }
@@ -2354,6 +2360,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                   clientPayload: clientPayloadCollector.build(errorBody, {
                     includeEvents: false,
                   }),
+                  ttft: getTtftMs(),
                 });
               } catch {}
             }
@@ -2505,6 +2512,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                 clientPayload: clientPayloadCollector.build(responseBody, {
                   includeEvents: false,
                 }),
+                ttft: getTtftMs(),
               });
             } catch {}
           }

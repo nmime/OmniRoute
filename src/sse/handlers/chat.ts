@@ -174,6 +174,19 @@ function intersectAllowedConnectionIds(primary: unknown, secondary: unknown): st
 
 const PROVIDER_BREAKER_FAILURE_STATUSES = new Set([408, 500, 502, 503, 504]);
 
+function createLocalCapacityResponse(provider: string, model: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `[${provider}/${model}] All eligible accounts are at local concurrency capacity`,
+        type: "account_semaphore_capacity",
+        code: "LOCAL_ACCOUNT_SEMAPHORE_FULL",
+      },
+    }),
+    { status: HTTP_STATUS.RATE_LIMITED, headers: { "Content-Type": "application/json" } }
+  );
+}
+
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
@@ -923,6 +936,9 @@ async function handleSingleModelChat(
       preselectedCredentials = null;
 
       if (!credentials || "allRateLimited" in credentials) {
+        if (credentials?.localCapacityExhausted) {
+          return createLocalCapacityResponse(provider, model);
+        }
         if (credentials?.allRateLimited) {
           const retryDecision = getCooldownAwareRetryDecision({
             retryAfter: credentials.retryAfter,
@@ -1238,10 +1254,10 @@ async function handleSingleModelChat(
           `Account ${accountId}... at local concurrency cap, trying fallback account`
         );
         excludedConnectionIds.add(credentials.connectionId);
-        lastError = result.error;
-        lastStatus = result.status;
-        requestRetryLastError = result.error;
-        requestRetryLastStatus = result.status;
+        lastError = "All eligible accounts are at local concurrency capacity";
+        lastStatus = HTTP_STATUS.RATE_LIMITED;
+        requestRetryLastError = lastError;
+        requestRetryLastStatus = lastStatus;
         continue;
       }
 

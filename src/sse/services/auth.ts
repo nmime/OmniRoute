@@ -54,6 +54,10 @@ import {
 import { isModelExcludedByConnection } from "@/domain/connectionModelRules";
 import * as log from "../utils/logger";
 import { fisherYatesShuffle, getNextFromDeckSync } from "@/shared/utils/shuffleDeck";
+import {
+  buildAccountSemaphoreKey,
+  getSnapshot as getAccountSemaphoreSnapshot,
+} from "@omniroute/open-sse/services/accountSemaphore.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1117,9 +1121,23 @@ export async function getProviderCredentials(
       return true;
     });
 
+    const capacityEligibleConnections =
+      provider === "codex"
+        ? availableConnections.filter((connection) => {
+            const maxConcurrency = toNumber(connection.maxConcurrent, 0);
+            if (maxConcurrency <= 0) return true;
+            const snapshot = getAccountSemaphoreSnapshot(
+              buildAccountSemaphoreKey({ provider, accountKey: connection.id })
+            );
+            return !snapshot || snapshot.running < maxConcurrency;
+          })
+        : availableConnections;
+
     log.debug(
       "AUTH",
-      `${provider} | available: ${availableConnections.length}/${connections.length}`
+      `${provider} | available: ${availableConnections.length}/${connections.length}${
+        provider === "codex" ? `, local-capacity: ${capacityEligibleConnections.length}` : ""
+      }`
     );
     connections.forEach((c) => {
       const excluded = excludedConnectionIds.has(c.id);
@@ -1249,7 +1267,18 @@ export async function getProviderCredentials(
       return null;
     }
 
-    let policyEligibleConnections = availableConnections;
+    if (availableConnections.length > 0 && capacityEligibleConnections.length === 0) {
+      return {
+        allRateLimited: true,
+        retryAfter: new Date(Date.now() + 1_000).toISOString(),
+        retryAfterHuman: "local account capacity exhausted",
+        lastError: `All ${provider} accounts are at local concurrency capacity`,
+        lastErrorCode: 429,
+        localCapacityExhausted: true,
+      };
+    }
+
+    let policyEligibleConnections = capacityEligibleConnections;
     const blockedByPolicy: Array<{
       id: string;
       reasons: string[];
