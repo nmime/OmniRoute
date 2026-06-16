@@ -223,6 +223,7 @@ import {
 import {
   acquire as acquireAccountSemaphore,
   markBlocked as markAccountSemaphoreBlocked,
+  tryAcquire as tryAcquireAccountSemaphore,
 } from "../services/accountSemaphore.ts";
 import { lockModel, lockModelIfPerModelQuota } from "../services/accountFallback.ts";
 import {
@@ -364,13 +365,60 @@ async function readNonStreamingResponseBody(
   return rawBody;
 }
 
+function getHeaderValueCaseInsensitive(
+  headers: Record<string, unknown> | Headers | null | undefined,
+  targetName: string
+) {
+  if (!headers || typeof headers !== "object") return null;
+  if (headers instanceof Headers) {
+    return headers.get(targetName);
+  }
+  const lowered = targetName.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lowered && typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function toFiniteNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+const LOCAL_ACCOUNT_SEMAPHORE_CAPACITY_ERROR_CODES = new Set([
+  "SEMAPHORE_TIMEOUT",
+  "SEMAPHORE_QUEUE_FULL",
+  "LOCAL_ACCOUNT_SEMAPHORE_FULL",
+  "LOCAL_ACCOUNT_SEMAPHORE_BLOCKED",
+]);
+
 function isSemaphoreCapacityError(error: unknown): error is Error & { code: string } {
   return (
     !!error &&
     typeof error === "object" &&
-    ((error as { code?: unknown }).code === "SEMAPHORE_TIMEOUT" ||
-      (error as { code?: unknown }).code === "SEMAPHORE_QUEUE_FULL")
+    LOCAL_ACCOUNT_SEMAPHORE_CAPACITY_ERROR_CODES.has(String((error as { code?: unknown }).code || ""))
   );
+}
+
+function createLocalAccountSemaphoreCapacityResult(
+  statusCode: number,
+  message: string,
+  errorCode: string
+) {
+  const result = createErrorResult(statusCode, message, null, errorCode, "account_semaphore_capacity");
+  return {
+    ...result,
+    errorType: "account_semaphore_capacity",
+    errorCode,
+  };
 }
 
 function createStreamingErrorResult(
@@ -2953,18 +3001,38 @@ export async function handleChatCore({
         semaphoreKey: accountSemaphoreKey,
         max: accountSemaphoreMaxConcurrency,
       });
+      let acquireAccountSemaphoreRelease = () => {};
       if (accountSemaphoreKey && accountSemaphoreMaxConcurrency != null) {
-        updatePendingScope(pendingScope, {
-          stage: "waiting_account_slot",
-        });
+        if (provider === "codex") {
+          const localSlot = tryAcquireAccountSemaphore(accountSemaphoreKey, {
+            maxConcurrency: accountSemaphoreMaxConcurrency,
+          });
+          if (!localSlot.acquired) {
+            const code =
+              localSlot.reason === "blocked"
+                ? "LOCAL_ACCOUNT_SEMAPHORE_BLOCKED"
+                : "LOCAL_ACCOUNT_SEMAPHORE_FULL";
+            log?.warn?.(
+              "ACCOUNT_SEMAPHORE",
+              `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); rotating without queue wait`
+            );
+            return createLocalAccountSemaphoreCapacityResult(
+              HTTP_STATUS.RATE_LIMITED,
+              "Selected Codex account is at local concurrency capacity",
+              code
+            );
+          }
+          acquireAccountSemaphoreRelease = localSlot.release;
+        } else {
+          updatePendingScope(pendingScope, {
+            stage: "waiting_account_slot",
+          });
+          acquireAccountSemaphoreRelease = await acquireAccountSemaphore(accountSemaphoreKey, {
+            maxConcurrency: accountSemaphoreMaxConcurrency,
+            signal: streamController.signal,
+          });
+        }
       }
-      const acquireAccountSemaphoreRelease =
-        accountSemaphoreKey && accountSemaphoreMaxConcurrency != null
-          ? await acquireAccountSemaphore(accountSemaphoreKey, {
-              maxConcurrency: accountSemaphoreMaxConcurrency,
-              signal: streamController.signal,
-            })
-          : () => {};
       trace("post_semaphore");
       updatePendingScope(pendingScope, {
         stage: "waiting_rate_limit",
@@ -3497,17 +3565,14 @@ export async function handleChatCore({
         providerRequest: finalBody || translatedBody,
         clientResponse: buildErrorBody(HTTP_STATUS.RATE_LIMITED, failureMessage),
         claudeCacheMeta: claudePromptCacheLogMeta,
-        cacheSource: "upstream",
+        cacheSource: "local_capacity",
       });
       persistFailureUsage(HTTP_STATUS.RATE_LIMITED, error.code);
-      const result = stream
-        ? createStreamingErrorResult(HTTP_STATUS.RATE_LIMITED, failureMessage, error.code)
-        : createErrorResult(HTTP_STATUS.RATE_LIMITED, failureMessage);
-      return {
-        ...result,
-        errorType: "account_semaphore_capacity",
-        errorCode: error.code,
-      };
+      return createLocalAccountSemaphoreCapacityResult(
+        HTTP_STATUS.RATE_LIMITED,
+        failureMessage,
+        error.code
+      );
     }
     const failureStatus =
       error.name === "AbortError"

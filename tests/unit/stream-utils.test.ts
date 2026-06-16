@@ -2432,3 +2432,47 @@ test("createSSEStream passthrough does not swallow false positive textual tool c
   assert.equal(choice.message.tool_calls, undefined);
   assert.match(text, /\[Tool call: terminal\] was skipped/);
 });
+
+
+test("createSSEStream includes ttft in completion payload", async () => {
+  let completion: Record<string, unknown> | null = null;
+  const source = new ReadableStream({
+    start(controller) {
+      setTimeout(() => {
+        controller.enqueue(
+          textEncoder.encode(
+            `data: ${JSON.stringify({
+              id: "chatcmpl_ttft",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "gpt-4o-mini",
+              choices: [{ index: 0, delta: { role: "assistant", content: "hi" } }],
+            })}\n\n`
+          )
+        );
+        controller.enqueue(textEncoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }, 15);
+    },
+  });
+
+  await new Response(
+    source.pipeThrough(
+      createSSEStream({
+        mode: "passthrough",
+        sourceFormat: FORMATS.OPENAI,
+        clientResponseFormat: FORMATS.OPENAI,
+        provider: "openai",
+        model: "gpt-4o-mini",
+        body: {},
+        onComplete(payload) {
+          completion = payload as Record<string, unknown>;
+        },
+      })
+    )
+  ).text();
+
+  assert.ok(completion);
+  assert.equal(typeof completion.ttft, "number");
+  assert.ok((completion.ttft as number) >= 0);
+});

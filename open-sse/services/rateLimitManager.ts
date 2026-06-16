@@ -538,7 +538,10 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
   await awaitProviderDefaultSlot(provider, connectionId, signal, currentRequestQueueSettings.maxWaitMs);
 
   const limiter = getLimiter(provider, connectionId, model);
-  const maxWaitMs = currentRequestQueueSettings.maxWaitMs;
+  // Bottleneck `expiration` is an execution lifetime cap, not a pure queue-wait cap.
+  // Codex Responses calls can legitimately run longer than requestQueue.maxWaitMs;
+  // letting Bottleneck expire them aborts healthy upstream work and collapses TPS.
+  const maxWaitMs = provider === "codex" ? 0 : currentRequestQueueSettings.maxWaitMs;
   const scheduleOpts = maxWaitMs && maxWaitMs > 0 ? { expiration: maxWaitMs } : {};
 
   try {
