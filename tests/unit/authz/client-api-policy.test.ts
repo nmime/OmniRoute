@@ -100,12 +100,15 @@ test("clientApiPolicy: REQUIRE_API_KEY DB feature flag override can disable env 
   featureFlagsDb.setFeatureFlagOverride("REQUIRE_API_KEY", "false");
 
   const policy = await loadPolicy();
-  const out = await policy.evaluate(ctx(new Headers()));
+  const out = await policy.evaluate(ctx(new Headers(), "POST", "/api/v1/embeddings"));
   assert.equal(out.allow, true);
   if (out.allow) {
     assert.equal(out.subject.kind, "anonymous");
     assert.equal(out.subject.id, "local");
   }
+
+  const providerBacked = await policy.evaluate(ctx(new Headers(), "POST", "/api/v1/responses"));
+  assert.equal(providerBacked.allow, false);
 });
 
 test("clientApiPolicy: dashboard session can read the model catalog without bearer", async () => {
@@ -155,7 +158,8 @@ test("clientApiPolicy: valid bearer is accepted as client_api_key subject", asyn
   assert.equal(out.allow, true);
   if (out.allow) {
     assert.equal(out.subject.kind, "client_api_key");
-    assert.match(out.subject.id, /^key_/);
+    assert.equal(out.subject.id, created.id);
+    assert.equal(out.subject.label, "policy-test-key");
   }
 });
 
@@ -193,7 +197,8 @@ test("clientApiPolicy: x-api-key header is accepted as client_api_key subject", 
   assert.equal(out.allow, true);
   if (out.allow) {
     assert.equal(out.subject.kind, "client_api_key");
-    assert.match(out.subject.id, /^key_/);
+    assert.equal(out.subject.id, created.id);
+    assert.equal(out.subject.label, "policy-test-xkey");
   }
 });
 
