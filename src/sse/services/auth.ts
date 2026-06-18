@@ -1121,15 +1121,25 @@ export async function getProviderCredentials(
       return true;
     });
 
-    const capacityEligibleConnections =
+    const localCapacitySnapshots =
       provider === "codex"
-        ? availableConnections.filter((connection) => {
+        ? availableConnections.map((connection) => {
             const maxConcurrency = toNumber(connection.maxConcurrent, 0);
-            if (maxConcurrency <= 0) return true;
             const snapshot = getAccountSemaphoreSnapshot(
               buildAccountSemaphoreKey({ provider, accountKey: connection.id })
             );
-            return !snapshot || snapshot.running < maxConcurrency;
+            return {
+              connectionIdPrefix: connection.id ? connection.id.slice(0, 8) : null,
+              running: snapshot?.running ?? 0,
+              maxConcurrency: maxConcurrency > 0 ? maxConcurrency : null,
+              eligible: maxConcurrency <= 0 || !snapshot || snapshot.running < maxConcurrency,
+            };
+          })
+        : [];
+    const capacityEligibleConnections =
+      provider === "codex"
+        ? availableConnections.filter((connection, index) => {
+            return localCapacitySnapshots[index]?.eligible !== false;
           })
         : availableConnections;
 
@@ -1275,6 +1285,11 @@ export async function getProviderCredentials(
         lastError: `All ${provider} accounts are at local concurrency capacity`,
         lastErrorCode: 429,
         localCapacityExhausted: true,
+        localCapacitySnapshot: {
+          eligible: 0,
+          total: availableConnections.length,
+          accounts: localCapacitySnapshots,
+        },
       };
     }
 

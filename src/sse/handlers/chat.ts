@@ -68,6 +68,7 @@ import { generateRequestId } from "../../shared/utils/requestId";
 import { logAuditEvent } from "../../lib/compliance/index";
 import { enforceApiKeyPolicy } from "../../shared/utils/apiKeyPolicy";
 import { cloneLogPayload } from "@/lib/logPayloads";
+import { saveCallLog, saveRequestUsage } from "@/lib/usageDb";
 import {
   applyTaskAwareRouting,
   getTaskRoutingConfig,
@@ -174,13 +175,102 @@ function intersectAllowedConnectionIds(primary: unknown, secondary: unknown): st
 
 const PROVIDER_BREAKER_FAILURE_STATUSES = new Set([408, 500, 502, 503, 504]);
 
-function createLocalCapacityResponse(provider: string, model: string): Response {
+type LocalCapacityRejectLogOptions = {
+  path?: string | null;
+  requestedModel?: string | null;
+  connectionId?: string | null;
+  apiKeyInfo?: { id?: unknown; name?: unknown } | null;
+  startedAt?: number | null;
+  errorCode?: string | null;
+  message?: string | null;
+  timestamp?: string | null;
+  snapshot?: Record<string, unknown> | null;
+};
+
+function persistLocalCapacityReject(
+  provider: string,
+  model: string,
+  options: LocalCapacityRejectLogOptions = {}
+) {
+  const timestamp = options.timestamp || new Date().toISOString();
+  const errorCode = options.errorCode || "LOCAL_ACCOUNT_SEMAPHORE_FULL";
+  const message =
+    options.message ||
+    `[${provider}/${model}] All eligible accounts are at local concurrency capacity`;
+  const duration = Math.max(0, options.startedAt ? Date.now() - options.startedAt : 0);
+  const apiKeyId =
+    typeof options.apiKeyInfo?.id === "string" && options.apiKeyInfo.id.trim().length > 0
+      ? options.apiKeyInfo.id
+      : undefined;
+  const apiKeyName =
+    typeof options.apiKeyInfo?.name === "string" && options.apiKeyInfo.name.trim().length > 0
+      ? options.apiKeyInfo.name
+      : undefined;
+  const connectionId =
+    typeof options.connectionId === "string" && options.connectionId.trim().length > 0
+      ? options.connectionId
+      : undefined;
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, reasoning: 0 };
+  const error = {
+    type: "account_semaphore_capacity",
+    code: errorCode,
+    message,
+    ...(options.snapshot ? { localCapacity: options.snapshot } : {}),
+  };
+
+  saveCallLog({
+    timestamp,
+    method: "POST",
+    path: options.path || "/v1/chat/completions",
+    status: HTTP_STATUS.RATE_LIMITED,
+    model: model || "unknown",
+    requestedModel: options.requestedModel || model || null,
+    provider: provider || "unknown",
+    connectionId,
+    duration,
+    tokens,
+    requestBody: null,
+    responseBody: null,
+    error,
+    apiKeyId,
+    apiKeyName,
+  }).catch(() => {});
+
+  saveRequestUsage({
+    provider: provider || "unknown",
+    model: model || "unknown",
+    connectionId,
+    apiKeyId,
+    apiKeyName,
+    tokens,
+    status: String(HTTP_STATUS.RATE_LIMITED),
+    success: false,
+    latencyMs: duration,
+    timeToFirstTokenMs: 0,
+    errorCode,
+    timestamp,
+  }).catch(() => {});
+}
+
+function createLocalCapacityResponse(
+  provider: string,
+  model: string,
+  options: LocalCapacityRejectLogOptions = {}
+): Response {
+  const message =
+    options.message ||
+    `[${provider}/${model}] All eligible accounts are at local concurrency capacity`;
+  persistLocalCapacityReject(provider, model, {
+    ...options,
+    message,
+    errorCode: options.errorCode || "LOCAL_ACCOUNT_SEMAPHORE_FULL",
+  });
   return new Response(
     JSON.stringify({
       error: {
-        message: `[${provider}/${model}] All eligible accounts are at local concurrency capacity`,
+        message,
         type: "account_semaphore_capacity",
-        code: "LOCAL_ACCOUNT_SEMAPHORE_FULL",
+        code: options.errorCode || "LOCAL_ACCOUNT_SEMAPHORE_FULL",
       },
     }),
     { status: HTTP_STATUS.RATE_LIMITED, headers: { "Content-Type": "application/json" } }
@@ -937,7 +1027,17 @@ async function handleSingleModelChat(
 
       if (!credentials || "allRateLimited" in credentials) {
         if (credentials?.localCapacityExhausted) {
-          return createLocalCapacityResponse(provider, model);
+          return createLocalCapacityResponse(provider, model, {
+            path:
+              clientRawRequest?.endpoint || (request?.url ? new URL(request.url).pathname : null),
+            requestedModel: modelStr,
+            apiKeyInfo,
+            snapshot:
+              typeof credentials.localCapacitySnapshot === "object" &&
+              credentials.localCapacitySnapshot
+                ? (credentials.localCapacitySnapshot as Record<string, unknown>)
+                : null,
+          });
         }
         if (credentials?.allRateLimited) {
           const retryDecision = getCooldownAwareRetryDecision({
