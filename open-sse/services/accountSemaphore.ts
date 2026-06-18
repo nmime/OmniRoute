@@ -2,8 +2,10 @@
  * Account Semaphore
  *
  * In-memory provider/account concurrency limiter keyed by provider and account.
- * Requests beyond the configured concurrency cap wait in a FIFO queue until a slot opens,
- * the gate is unblocked, or the queue timeout expires.
+ * Requests beyond a selected account cap can queue on that account for non-Codex
+ * providers. Codex uses waitForAccountSemaphoreCapacity() to wait briefly for any
+ * eligible account to free capacity, then re-runs account selection instead of
+ * queueing behind one already-full account.
  */
 
 export interface AccountSemaphoreKeyParts {
@@ -15,6 +17,15 @@ interface QueuedAcquire {
   resolve: (release: () => void) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface CapacityWaiter {
+  keys: Set<string>;
+  resolve: (result: WaitForAccountSemaphoreCapacityResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  cleanup: () => void;
+  startedAt: number;
 }
 
 interface AccountGate {
@@ -39,6 +50,29 @@ export interface AccountSemaphoreStatsEntry {
   blockedUntil: string | null;
 }
 
+export interface AccountSemaphoreCapacityKey {
+  key: string;
+  maxConcurrency?: number | null;
+}
+
+export interface WaitForAccountSemaphoreCapacityOptions {
+  timeoutMs?: number;
+  maxWaiters?: number;
+  signal?: AbortSignal | null;
+}
+
+export type WaitForAccountSemaphoreCapacityReason =
+  | "already_available"
+  | "capacity_available"
+  | "bypassed";
+
+export interface WaitForAccountSemaphoreCapacityResult {
+  key: string | null;
+  reason: WaitForAccountSemaphoreCapacityReason;
+  waitedMs: number;
+  snapshot: Record<string, AccountSemaphoreStatsEntry>;
+}
+
 export type TryAcquireAccountSemaphoreReason = "acquired" | "bypassed" | "full" | "blocked";
 
 export interface TryAcquireAccountSemaphoreResult {
@@ -50,8 +84,11 @@ export interface TryAcquireAccountSemaphoreResult {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_QUEUE_SIZE = 20;
+const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 12_000;
+const DEFAULT_CAPACITY_MAX_WAITERS = 30;
 
 const gates = new Map<string, AccountGate>();
+const capacityWaiters = new Set<CapacityWaiter>();
 
 /**
  * Build the canonical account semaphore key.
@@ -162,9 +199,11 @@ function createReleaseFn(semaphoreKey: string): () => void {
 
     if (gate.queue.length > 0) {
       drainQueue(semaphoreKey);
+      notifyCapacityWaiters(semaphoreKey);
       return;
     }
 
+    notifyCapacityWaiters(semaphoreKey);
     scheduleCleanup(semaphoreKey);
   };
 }
@@ -198,6 +237,65 @@ function createBypassedSnapshot(): AccountSemaphoreStatsEntry {
   };
 }
 
+function normalizeCapacityKey(
+  entry: string | AccountSemaphoreCapacityKey
+): AccountSemaphoreCapacityKey {
+  if (typeof entry === "string") return { key: entry };
+  return entry;
+}
+
+function snapshotKeys(keys: Iterable<string>): Record<string, AccountSemaphoreStatsEntry> {
+  const snapshots: Record<string, AccountSemaphoreStatsEntry> = {};
+  for (const key of keys) {
+    const gate = gates.get(key);
+    if (gate) snapshots[key] = snapshotGate(gate);
+  }
+  return snapshots;
+}
+
+function findAvailableCapacity(
+  entries: AccountSemaphoreCapacityKey[]
+): { key: string | null; reason: WaitForAccountSemaphoreCapacityReason } | null {
+  for (const entry of entries) {
+    if (!entry.key) continue;
+    if (isBypassed(entry.maxConcurrency)) {
+      return { key: entry.key, reason: "bypassed" };
+    }
+
+    const maxConcurrency = Number(entry.maxConcurrency);
+    const gate = ensureGate(entry.key, maxConcurrency);
+    clearCleanupTimer(gate);
+    if (!isBlocked(gate) && gate.running < gate.maxConcurrency) {
+      return { key: entry.key, reason: "capacity_available" };
+    }
+  }
+  return null;
+}
+
+function notifyCapacityWaiters(releasedKey: string): void {
+  if (capacityWaiters.size === 0) return;
+  const now = Date.now();
+
+  for (const waiter of Array.from(capacityWaiters)) {
+    if (!waiter.keys.has(releasedKey)) continue;
+
+    const available = findAvailableCapacity(
+      Array.from(waiter.keys).map((key) => ({
+        key,
+        maxConcurrency: gates.get(key)?.maxConcurrency ?? null,
+      }))
+    );
+    if (!available) continue;
+
+    waiter.cleanup();
+    waiter.resolve({
+      key: available.key,
+      reason: "capacity_available",
+      waitedMs: Math.max(0, now - waiter.startedAt),
+      snapshot: snapshotKeys(waiter.keys),
+    });
+  }
+}
 
 function makeAbortError(signal: AbortSignal): Error {
   const reason = signal.reason;
@@ -255,6 +353,121 @@ export function tryAcquire(
 export function getSnapshot(semaphoreKey: string): AccountSemaphoreStatsEntry | null {
   const gate = gates.get(semaphoreKey);
   return gate ? snapshotGate(gate) : null;
+}
+
+/**
+ * Wait briefly until at least one of several account semaphore keys has capacity.
+ *
+ * This is intentionally NOT an acquire: callers must re-run account selection and
+ * use tryAcquire() so a burst waiter is not pinned to the account that happened
+ * to release. The waiter pool is process-wide, bounded, short-lived, and woken
+ * by semaphore releases (no per-account 30s FIFO).
+ */
+export function waitForAccountSemaphoreCapacity(
+  keys: Array<string | AccountSemaphoreCapacityKey>,
+  {
+    timeoutMs = DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
+    maxWaiters = DEFAULT_CAPACITY_MAX_WAITERS,
+    signal = null,
+  }: WaitForAccountSemaphoreCapacityOptions = {}
+): Promise<WaitForAccountSemaphoreCapacityResult> {
+  const normalized = keys.map(normalizeCapacityKey).filter((entry) => entry.key);
+  const keySet = new Set(normalized.map((entry) => entry.key));
+  const startedAt = Date.now();
+
+  const available = findAvailableCapacity(normalized);
+  if (available) {
+    return Promise.resolve({
+      key: available.key,
+      reason: "already_available",
+      waitedMs: 0,
+      snapshot: snapshotKeys(keySet),
+    });
+  }
+
+  if (signal?.aborted) {
+    return Promise.reject(makeAbortError(signal));
+  }
+
+  if (capacityWaiters.size >= maxWaiters) {
+    const err = new Error(`Account semaphore capacity queue full (${maxWaiters})`) as Error & {
+      code: string;
+      waitedMs: number;
+      snapshot: Record<string, AccountSemaphoreStatsEntry>;
+    };
+    err.code = "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL";
+    err.waitedMs = 0;
+    err.snapshot = snapshotKeys(keySet);
+    return Promise.reject(err);
+  }
+
+  return new Promise((resolve, reject) => {
+    let abortListener: (() => void) | null = null;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let waiter: CapacityWaiter;
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (waiter) capacityWaiters.delete(waiter);
+      if (abortListener && signal) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    };
+
+    const rejectWithCapacityError = (code: string, message: string) => {
+      const err = new Error(message) as Error & {
+        code: string;
+        waitedMs: number;
+        snapshot: Record<string, AccountSemaphoreStatsEntry>;
+      };
+      err.code = code;
+      err.waitedMs = Math.max(0, Date.now() - startedAt);
+      err.snapshot = snapshotKeys(keySet);
+      cleanup();
+      reject(err);
+    };
+
+    timer = setTimeout(() => {
+      rejectWithCapacityError(
+        "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT",
+        `Account semaphore capacity queue timed out after ${timeoutMs}ms`
+      );
+    }, timeoutMs);
+    timer.unref?.();
+
+    waiter = {
+      keys: keySet,
+      resolve: (result) => {
+        cleanup();
+        resolve(result);
+      },
+      reject: (error) => {
+        cleanup();
+        reject(error);
+      },
+      timer,
+      cleanup,
+      startedAt,
+    };
+
+    capacityWaiters.add(waiter);
+
+    if (signal) {
+      abortListener = () => {
+        const error = makeAbortError(signal);
+        cleanup();
+        reject(error);
+      };
+      if (signal.aborted) {
+        abortListener();
+      } else {
+        signal.addEventListener("abort", abortListener);
+      }
+    }
+  });
 }
 
 /**
@@ -419,6 +632,12 @@ export function getStats(): Record<string, AccountSemaphoreStatsEntry> {
  * Reset a single key and reject queued waiters.
  */
 export function reset(semaphoreKey: string): void {
+  for (const waiter of Array.from(capacityWaiters)) {
+    if (!waiter.keys.has(semaphoreKey)) continue;
+    waiter.cleanup();
+    waiter.reject(new Error("Semaphore reset"));
+  }
+
   const gate = gates.get(semaphoreKey);
   if (!gate) return;
 
@@ -434,6 +653,10 @@ export function reset(semaphoreKey: string): void {
  * Reset all keys and reject queued waiters.
  */
 export function resetAll(): void {
+  for (const waiter of Array.from(capacityWaiters)) {
+    waiter.cleanup();
+    waiter.reject(new Error("Semaphore reset"));
+  }
   for (const key of gates.keys()) {
     reset(key);
   }
