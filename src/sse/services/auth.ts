@@ -59,6 +59,8 @@ import { fisherYatesShuffle, getNextFromDeckSync } from "@/shared/utils/shuffleD
 import {
   buildAccountSemaphoreKey,
   getSnapshot as getAccountSemaphoreSnapshot,
+  waitForAccountSemaphoreCapacity,
+  type AccountSemaphoreCapacityKey,
 } from "@omniroute/open-sse/services/accountSemaphore.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -110,6 +112,10 @@ interface CredentialSelectionOptions {
   excludeConnectionIds?: string[] | null;
   sessionKey?: string | null;
   sessionAffinityTtlMs?: number | null;
+  waitForLocalCapacity?: boolean;
+  localCapacityWaitTimeoutMs?: number | null;
+  localCapacityMaxWaiters?: number | null;
+  signal?: AbortSignal | null;
 }
 
 interface CooldownInspectionState {
@@ -120,6 +126,28 @@ interface CooldownInspectionState {
 }
 
 const MIN_QUOTA_THRESHOLD_PERCENT = 1;
+const DEFAULT_CODEX_LOCAL_CAPACITY_WAIT_TIMEOUT_MS = 12_000;
+const DEFAULT_CODEX_LOCAL_CAPACITY_MAX_WAITERS = 30;
+
+function parsePositiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function resolveCodexLocalCapacityWaitTimeoutMs(options: CredentialSelectionOptions): number {
+  return parsePositiveInt(
+    options.localCapacityWaitTimeoutMs ?? process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS,
+    DEFAULT_CODEX_LOCAL_CAPACITY_WAIT_TIMEOUT_MS
+  );
+}
+
+function resolveCodexLocalCapacityMaxWaiters(options: CredentialSelectionOptions): number {
+  return parsePositiveInt(
+    options.localCapacityMaxWaiters ?? process.env.CODEX_LOCAL_CAPACITY_QUEUE_MAX_WAITERS,
+    DEFAULT_CODEX_LOCAL_CAPACITY_MAX_WAITERS
+  );
+}
+
 const MAX_QUOTA_THRESHOLD_PERCENT = 100;
 const NON_RETRYABLE_MODEL_LOCKOUT_REASONS = new Set(["not_found", "not_found_local"]);
 
@@ -1124,13 +1152,16 @@ export async function getProviderCredentials(
       return true;
     });
 
+    const localCapacityKeys: AccountSemaphoreCapacityKey[] = [];
     const localCapacitySnapshots =
       provider === "codex"
         ? availableConnections.map((connection) => {
             const maxConcurrency = toNumber(connection.maxConcurrent, 0);
-            const snapshot = getAccountSemaphoreSnapshot(
-              buildAccountSemaphoreKey({ provider, accountKey: connection.id })
-            );
+            const semaphoreKey = buildAccountSemaphoreKey({ provider, accountKey: connection.id });
+            const snapshot = getAccountSemaphoreSnapshot(semaphoreKey);
+            if (maxConcurrency > 0) {
+              localCapacityKeys.push({ key: semaphoreKey, maxConcurrency });
+            }
             return {
               connectionIdPrefix: connection.id ? connection.id.slice(0, 8) : null,
               running: snapshot?.running ?? 0,
@@ -1281,6 +1312,81 @@ export async function getProviderCredentials(
     }
 
     if (availableConnections.length > 0 && capacityEligibleConnections.length === 0) {
+      const waitTimeoutMs = resolveCodexLocalCapacityWaitTimeoutMs(options);
+      const maxWaiters = resolveCodexLocalCapacityMaxWaiters(options);
+      if (provider === "codex" && options.waitForLocalCapacity === true) {
+        const waitStartedAt = Date.now();
+        try {
+          selectionLock.release();
+          const waitResult = await waitForAccountSemaphoreCapacity(localCapacityKeys, {
+            timeoutMs: waitTimeoutMs,
+            maxWaiters,
+            signal: options.signal ?? null,
+          });
+          log.info(
+            "AUTH",
+            `${provider} | local capacity queue released after ${waitResult.waitedMs}ms; retrying account selection`
+          );
+          const readyConnectionId = waitResult.key
+            ? availableConnections.find(
+                (connection) =>
+                  buildAccountSemaphoreKey({ provider, accountKey: connection.id }) ===
+                  waitResult.key
+              )?.id
+            : null;
+          return getProviderCredentials(
+            provider,
+            excludeConnectionId,
+            allowedConnections,
+            requestedModel,
+            {
+              ...options,
+              waitForLocalCapacity: false,
+              ...(readyConnectionId ? { forcedConnectionId: readyConnectionId } : {}),
+            }
+          );
+        } catch (err) {
+          selectionLock.release();
+          const error = err as Error & {
+            code?: string;
+            waitedMs?: number;
+            snapshot?: Record<string, unknown>;
+          };
+          const waitedMs = Number.isFinite(error.waitedMs)
+            ? Math.max(0, Number(error.waitedMs))
+            : Math.max(0, Date.now() - waitStartedAt);
+          const code =
+            error.code === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+              ? "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+              : "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT";
+          return {
+            allRateLimited: true,
+            retryAfter: new Date(Date.now() + 1_000).toISOString(),
+            retryAfterHuman:
+              code === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                ? "local capacity queue full"
+                : "local capacity queue timeout",
+            lastError:
+              code === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                ? `Local ${provider} capacity queue is full`
+                : `Timed out waiting for local ${provider} account capacity`,
+            lastErrorCode: 429,
+            localCapacityExhausted: true,
+            localCapacityWaitMs: waitedMs,
+            localCapacityQueueReason: code,
+            localCapacitySnapshot: {
+              eligible: 0,
+              total: availableConnections.length,
+              accounts: localCapacitySnapshots,
+              waitMs: waitedMs,
+              reason: code,
+              maxWaiters,
+              timeoutMs: waitTimeoutMs,
+            },
+          };
+        }
+      }
+
       return {
         allRateLimited: true,
         retryAfter: new Date(Date.now() + 1_000).toISOString(),
@@ -1288,10 +1394,12 @@ export async function getProviderCredentials(
         lastError: `All ${provider} accounts are at local concurrency capacity`,
         lastErrorCode: 429,
         localCapacityExhausted: true,
+        localCapacityQueueReason: "LOCAL_ACCOUNT_SEMAPHORE_FULL",
         localCapacitySnapshot: {
           eligible: 0,
           total: availableConnections.length,
           accounts: localCapacitySnapshots,
+          reason: "LOCAL_ACCOUNT_SEMAPHORE_FULL",
         },
       };
     }

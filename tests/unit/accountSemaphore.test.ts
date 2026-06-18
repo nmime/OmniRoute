@@ -10,6 +10,7 @@ import {
   reset,
   resetAll,
   tryAcquire,
+  waitForAccountSemaphoreCapacity,
 } from "../../open-sse/services/accountSemaphore";
 
 afterEach(() => {
@@ -213,4 +214,85 @@ describe("accountSemaphore", async () => {
     assert.ok(result.snapshot.blockedUntil);
   });
 
+  it("waitForAccountSemaphoreCapacity wakes on any eligible release without acquiring", async () => {
+    const keyA = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-a" });
+    const keyB = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-b" });
+
+    const releaseA = await acquire(keyA, { maxConcurrency: 1, timeoutMs: 200 });
+    const releaseB = await acquire(keyB, { maxConcurrency: 1, timeoutMs: 200 });
+
+    const startedAt = Date.now();
+    const waiter = waitForAccountSemaphoreCapacity(
+      [
+        { key: keyA, maxConcurrency: 1 },
+        { key: keyB, maxConcurrency: 1 },
+      ],
+      { timeoutMs: 500, maxWaiters: 5 }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    releaseB();
+
+    const result = await waiter;
+    assert.equal(result.key, keyB);
+    assert.equal(result.reason, "capacity_available");
+    assert.ok(result.waitedMs >= 20);
+    assert.ok(Date.now() - startedAt < 250);
+    assert.equal(getStats()[keyB]?.running ?? 0, 0, "waiter must not acquire the released slot");
+
+    releaseA();
+  });
+
+  it("waitForAccountSemaphoreCapacity times out quickly with safe snapshot metadata", async () => {
+    const key = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-timeout-local" });
+    const release = await acquire(key, { maxConcurrency: 1, timeoutMs: 200 });
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      waitForAccountSemaphoreCapacity([{ key, maxConcurrency: 1 }], {
+        timeoutMs: 40,
+        maxWaiters: 5,
+      }),
+      (err: unknown) => {
+        const error = err as Error & {
+          code?: string;
+          waitedMs?: number;
+          snapshot?: Record<string, unknown>;
+        };
+        assert.equal(error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT");
+        assert.ok(Number(error.waitedMs) >= 30);
+        assert.ok(Date.now() - startedAt < 500);
+        assert.ok(error.snapshot?.[key]);
+        return true;
+      }
+    );
+
+    release();
+  });
+
+  it("waitForAccountSemaphoreCapacity rejects immediately when the local queue is full", async () => {
+    const key = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-queue-full" });
+    const release = await acquire(key, { maxConcurrency: 1, timeoutMs: 200 });
+    const firstWaiter = waitForAccountSemaphoreCapacity([{ key, maxConcurrency: 1 }], {
+      timeoutMs: 500,
+      maxWaiters: 1,
+    });
+
+    await assert.rejects(
+      waitForAccountSemaphoreCapacity([{ key, maxConcurrency: 1 }], {
+        timeoutMs: 500,
+        maxWaiters: 1,
+      }),
+      (err: unknown) => {
+        const error = err as Error & { code?: string; waitedMs?: number };
+        assert.equal(error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL");
+        assert.equal(error.waitedMs, 0);
+        return true;
+      }
+    );
+
+    release();
+    const result = await firstWaiter;
+    assert.equal(result.key, key);
+  });
 });

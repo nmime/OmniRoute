@@ -21,18 +21,219 @@ const { getBackgroundDegradationConfig } =
   await import("../../open-sse/services/backgroundTaskDetector.ts");
 const { setCustomAliases } = await import("../../open-sse/services/modelDeprecation.ts");
 const { setModelAlias } = await import("../../src/lib/db/models.ts");
+const accountSemaphore = await import("../../open-sse/services/accountSemaphore.ts");
+const providersDb = await import("../../src/lib/db/providers.ts");
+const { getCallLogs, getCallLogById } = await import("../../src/lib/usage/callLogs.ts");
 
 test.beforeEach(async () => {
   BaseExecutor.RETRY_CONFIG.delayMs = 0;
+  accountSemaphore.resetAll();
   await resetStorage();
 });
 
 test.afterEach(async () => {
+  accountSemaphore.resetAll();
   await resetStorage();
 });
 
 test.after(async () => {
   await harness.cleanup();
+});
+
+test("handleChat queues codex local capacity bursts then routes after a release", async () => {
+  const accountA = await seedConnection("codex", {
+    name: "codex-cap-a",
+    apiKey: "sk-codex-cap-a",
+    maxConcurrent: 1,
+  });
+  const accountB = await seedConnection("codex", {
+    name: "codex-cap-b",
+    apiKey: "sk-codex-cap-b",
+    maxConcurrent: 1,
+  });
+  const keyA = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountA.id,
+  });
+  const keyB = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountB.id,
+  });
+  const releaseA = await accountSemaphore.acquire(keyA, { maxConcurrency: 1, timeoutMs: 100 });
+  const releaseB = await accountSemaphore.acquire(keyB, { maxConcurrency: 1, timeoutMs: 100 });
+  let upstreamCalls = 0;
+
+  globalThis.fetch = async () => {
+    upstreamCalls++;
+    return buildOpenAIResponse("Queued codex response");
+  };
+
+  const responsePromise = handleChat(
+    buildRequest({
+      body: {
+        model: "codex/gpt-5",
+        stream: false,
+        messages: [{ role: "user", content: "queued burst" }],
+      },
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  releaseB();
+  const response = await responsePromise;
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamCalls, 1);
+  assert.equal(accountSemaphore.getStats()[keyB]?.running ?? 0, 0);
+
+  releaseA();
+});
+
+test("handleChat returns sanitized 429 when codex local capacity queue times out", async () => {
+  await settingsDb.updateSettings({ call_log_pipeline_enabled: true });
+  const accountA = await seedConnection("codex", {
+    name: "codex-timeout-a",
+    apiKey: "sk-codex-timeout-a",
+    maxConcurrent: 1,
+  });
+  const accountB = await seedConnection("codex", {
+    name: "codex-timeout-b",
+    apiKey: "sk-codex-timeout-b",
+    maxConcurrent: 1,
+  });
+  const releaseA = await accountSemaphore.acquire(
+    accountSemaphore.buildAccountSemaphoreKey({ provider: "codex", accountKey: accountA.id }),
+    { maxConcurrency: 1, timeoutMs: 100 }
+  );
+  const releaseB = await accountSemaphore.acquire(
+    accountSemaphore.buildAccountSemaphoreKey({ provider: "codex", accountKey: accountB.id }),
+    { maxConcurrency: 1, timeoutMs: 100 }
+  );
+  const originalTimeout = process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = "40";
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls++;
+    return buildOpenAIResponse("should not call upstream");
+  };
+
+  try {
+    const startedAt = Date.now();
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5",
+          stream: false,
+          messages: [{ role: "user", content: "timeout burst" }],
+        },
+      })
+    );
+    const payload = await response.json();
+
+    assert.equal(response.status, 429);
+    assert.equal(payload.error.type, "account_semaphore_capacity");
+    assert.equal(payload.error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT");
+    assert.equal(response.headers.get("Retry-After"), "1");
+    assert.equal(upstreamCalls, 0);
+    assert.ok(Date.now() - startedAt < 1000);
+
+    const rows = await Promise.all([
+      providersDb.getProviderConnectionById(accountA.id),
+      providersDb.getProviderConnectionById(accountB.id),
+    ]);
+    assert.deepEqual(
+      rows.map((row) => row.rateLimitedUntil ?? null),
+      [null, null]
+    );
+    assert.deepEqual(
+      rows.map((row) => row.backoffLevel ?? 0),
+      [0, 0]
+    );
+  } finally {
+    if (originalTimeout === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = originalTimeout;
+    }
+    releaseA();
+    releaseB();
+  }
+});
+
+test("handleChat returns and persists sanitized 429 when codex local capacity queue is full", async () => {
+  const account = await seedConnection("codex", {
+    name: "codex-queue-full-chat",
+    apiKey: "sk-codex-queue-full-chat",
+    maxConcurrent: 1,
+  });
+  const key = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: account.id,
+  });
+  const release = await accountSemaphore.acquire(key, { maxConcurrency: 1, timeoutMs: 100 });
+  const originalTimeout = process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+  const originalMaxWaiters = process.env.CODEX_LOCAL_CAPACITY_QUEUE_MAX_WAITERS;
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = "500";
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_MAX_WAITERS = "1";
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls++;
+    return buildOpenAIResponse("queued after full");
+  };
+
+  try {
+    const first = handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5",
+          stream: false,
+          messages: [{ role: "user", content: "first waiter" }],
+        },
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5",
+          stream: false,
+          messages: [{ role: "user", content: "second waiter" }],
+        },
+      })
+    );
+    const payload = await response.json();
+
+    assert.equal(response.status, 429);
+    assert.equal(payload.error.type, "account_semaphore_capacity");
+    assert.equal(payload.error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL");
+    assert.equal(upstreamCalls, 0);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const rows = await getCallLogs({ limit: 5 });
+    const detail = rows[0] ? await getCallLogById(rows[0].id) : null;
+    assert.equal(detail?.requestBody ?? null, null);
+    assert.equal(detail?.responseBody ?? null, null);
+    assert.equal(detail?.error?.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL");
+    assert.equal(detail?.error?.type, "account_semaphore_capacity");
+
+    release();
+    const firstResponse = await first;
+    assert.equal(firstResponse.status, 200);
+    assert.equal(upstreamCalls, 1);
+  } finally {
+    if (originalTimeout === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = originalTimeout;
+    }
+    if (originalMaxWaiters === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_MAX_WAITERS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_MAX_WAITERS = originalMaxWaiters;
+    }
+    release();
+  }
 });
 
 test("handleChat resolves model alias before routing", async () => {

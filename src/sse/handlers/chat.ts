@@ -196,6 +196,7 @@ type LocalCapacityRejectLogOptions = {
   message?: string | null;
   timestamp?: string | null;
   snapshot?: Record<string, unknown> | null;
+  retryAfterSec?: number | null;
 };
 
 function persistLocalCapacityReject(
@@ -284,7 +285,15 @@ function createLocalCapacityResponse(
         code: options.errorCode || "LOCAL_ACCOUNT_SEMAPHORE_FULL",
       },
     }),
-    { status: HTTP_STATUS.RATE_LIMITED, headers: { "Content-Type": "application/json" } }
+    {
+      status: HTTP_STATUS.RATE_LIMITED,
+      headers: {
+        "Content-Type": "application/json",
+        ...(Number.isFinite(options.retryAfterSec) && Number(options.retryAfterSec) > 0
+          ? { "Retry-After": String(Math.ceil(Number(options.retryAfterSec))) }
+          : {}),
+      },
+    }
   );
 }
 
@@ -1070,6 +1079,8 @@ async function handleSingleModelChat(
               {
                 sessionKey: runtimeOptions.sessionAffinityKey ?? runtimeOptions.sessionId ?? null,
                 excludeConnectionIds: Array.from(excludedConnectionIds),
+                waitForLocalCapacity: provider === "codex",
+                signal: requestSignal,
                 ...(runtimeOptions.allowRateLimitedConnection
                   ? { allowRateLimitedConnections: true }
                   : {}),
@@ -1088,6 +1099,18 @@ async function handleSingleModelChat(
 
       if (!credentials || "allRateLimited" in credentials) {
         if (credentials?.localCapacityExhausted) {
+          const localCapacityCode =
+            typeof credentials.localCapacityQueueReason === "string"
+              ? credentials.localCapacityQueueReason
+              : "LOCAL_ACCOUNT_SEMAPHORE_FULL";
+          const retryAfterSec = Number.isFinite(
+            new Date(credentials.retryAfter || 0).getTime() - Date.now()
+          )
+            ? Math.max(
+                1,
+                Math.ceil((new Date(credentials.retryAfter).getTime() - Date.now()) / 1000)
+              )
+            : 1;
           return createLocalCapacityResponse(provider, model, {
             path:
               clientRawRequest?.endpoint || (request?.url ? new URL(request.url).pathname : null),
@@ -1098,6 +1121,14 @@ async function handleSingleModelChat(
               credentials.localCapacitySnapshot
                 ? (credentials.localCapacitySnapshot as Record<string, unknown>)
                 : null,
+            errorCode: localCapacityCode,
+            message:
+              localCapacityCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                ? `[${provider}/${model}] Local capacity queue is full; retry shortly`
+                : localCapacityCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
+                  ? `[${provider}/${model}] Timed out waiting for local account capacity; retry shortly`
+                  : undefined,
+            retryAfterSec,
           });
         }
         if (credentials?.allRateLimited) {
@@ -1412,8 +1443,54 @@ async function handleSingleModelChat(
 
         log.warn(
           "AUTH",
-          `Account ${accountId}... at local concurrency cap, trying fallback account`
+          `Account ${accountId}... at local concurrency cap, trying fallback account or waiting briefly for local capacity`
         );
+        if (provider === "codex") {
+          const queuedCredentials = await getProviderCredentialsWithQuotaPreflight(
+            provider,
+            null,
+            effectiveAllowedConnections,
+            model,
+            {
+              sessionKey: runtimeOptions.sessionAffinityKey ?? runtimeOptions.sessionId ?? null,
+              excludeConnectionIds: Array.from(excludedConnectionIds),
+              waitForLocalCapacity: true,
+              signal: requestSignal,
+              ...(runtimeOptions.forcedConnectionId
+                ? { forcedConnectionId: runtimeOptions.forcedConnectionId }
+                : {}),
+            }
+          );
+          if (queuedCredentials?.localCapacityExhausted) {
+            const localCapacityCode =
+              typeof queuedCredentials.localCapacityQueueReason === "string"
+                ? queuedCredentials.localCapacityQueueReason
+                : "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT";
+            return createLocalCapacityResponse(provider, model, {
+              path:
+                clientRawRequest?.endpoint || (request?.url ? new URL(request.url).pathname : null),
+              requestedModel: modelStr,
+              apiKeyInfo,
+              snapshot:
+                typeof queuedCredentials.localCapacitySnapshot === "object" &&
+                queuedCredentials.localCapacitySnapshot
+                  ? (queuedCredentials.localCapacitySnapshot as Record<string, unknown>)
+                  : null,
+              errorCode: localCapacityCode,
+              message:
+                localCapacityCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                  ? `[${provider}/${model}] Local capacity queue is full; retry shortly`
+                  : `[${provider}/${model}] Timed out waiting for local account capacity; retry shortly`,
+              retryAfterSec: 1,
+            });
+          }
+          if (queuedCredentials && !("allRateLimited" in queuedCredentials)) {
+            preselectedCredentials = queuedCredentials;
+            lastError = "Selected account raced local capacity; retrying after local queue wait";
+            lastStatus = HTTP_STATUS.RATE_LIMITED;
+            continue;
+          }
+        }
         excludedConnectionIds.add(credentials.connectionId);
         lastError = "All eligible accounts are at local concurrency capacity";
         lastStatus = HTTP_STATUS.RATE_LIMITED;
