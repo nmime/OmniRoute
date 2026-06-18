@@ -404,7 +404,9 @@ function isSemaphoreCapacityError(error: unknown): error is Error & { code: stri
   return (
     !!error &&
     typeof error === "object" &&
-    LOCAL_ACCOUNT_SEMAPHORE_CAPACITY_ERROR_CODES.has(String((error as { code?: unknown }).code || ""))
+    LOCAL_ACCOUNT_SEMAPHORE_CAPACITY_ERROR_CODES.has(
+      String((error as { code?: unknown }).code || "")
+    )
   );
 }
 
@@ -413,12 +415,119 @@ function createLocalAccountSemaphoreCapacityResult(
   message: string,
   errorCode: string
 ) {
-  const result = createErrorResult(statusCode, message, null, errorCode, "account_semaphore_capacity");
+  const result = createErrorResult(
+    statusCode,
+    message,
+    null,
+    errorCode,
+    "account_semaphore_capacity"
+  );
   return {
     ...result,
     errorType: "account_semaphore_capacity",
     errorCode,
   };
+}
+
+function persistLocalAccountSemaphoreCapacityReject({
+  provider,
+  model,
+  requestedModel,
+  connectionId,
+  clientRawRequest,
+  apiKeyInfo,
+  startTime,
+  errorCode,
+  message,
+  sourceFormat,
+  targetFormat,
+  snapshot,
+  serviceTier,
+  comboName,
+  comboStrategy,
+  isCombo,
+  comboStepId,
+  comboExecutionKey,
+}: {
+  provider: string;
+  model: string;
+  requestedModel: string | null;
+  connectionId?: string | null;
+  clientRawRequest?: { endpoint?: string | null } | null;
+  apiKeyInfo?: { id?: unknown; name?: unknown; noLog?: unknown } | null;
+  startTime: number;
+  errorCode: string;
+  message: string;
+  sourceFormat?: string | null;
+  targetFormat?: string | null;
+  snapshot?: Record<string, unknown> | null;
+  serviceTier?: string | null;
+  comboName?: string | null;
+  comboStrategy?: string | null;
+  isCombo?: boolean;
+  comboStepId?: string | null;
+  comboExecutionKey?: string | null;
+}) {
+  const timestamp = new Date().toISOString();
+  const duration = Math.max(0, Date.now() - startTime);
+  const apiKeyId =
+    typeof apiKeyInfo?.id === "string" && apiKeyInfo.id.trim().length > 0
+      ? apiKeyInfo.id
+      : undefined;
+  const apiKeyName =
+    typeof apiKeyInfo?.name === "string" && apiKeyInfo.name.trim().length > 0
+      ? apiKeyInfo.name
+      : undefined;
+  const safeConnectionId =
+    typeof connectionId === "string" && connectionId.trim().length > 0 ? connectionId : undefined;
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, reasoning: 0 };
+  const error = {
+    type: "account_semaphore_capacity",
+    code: errorCode,
+    message,
+    ...(snapshot ? { localCapacity: snapshot } : {}),
+  };
+
+  saveCallLog({
+    timestamp,
+    method: "POST",
+    path: clientRawRequest?.endpoint || "/v1/chat/completions",
+    status: HTTP_STATUS.RATE_LIMITED,
+    model: model || "unknown",
+    requestedModel: requestedModel || model || null,
+    provider: provider || "unknown",
+    connectionId: safeConnectionId,
+    duration,
+    tokens,
+    requestBody: null,
+    responseBody: null,
+    error,
+    sourceFormat,
+    targetFormat,
+    comboName,
+    comboStepId,
+    comboExecutionKey,
+    apiKeyId,
+    apiKeyName,
+    noLog: apiKeyInfo?.noLog === true,
+  }).catch(() => {});
+
+  saveRequestUsage({
+    provider: provider || "unknown",
+    model: model || "unknown",
+    connectionId: safeConnectionId,
+    apiKeyId,
+    apiKeyName,
+    tokens,
+    status: String(HTTP_STATUS.RATE_LIMITED),
+    success: false,
+    latencyMs: duration,
+    timeToFirstTokenMs: 0,
+    errorCode,
+    timestamp,
+    serviceTier,
+    comboStrategy: isCombo ? comboStrategy || undefined : undefined,
+  }).catch(() => {});
 }
 
 function createStreamingErrorResult(
@@ -3016,6 +3125,35 @@ export async function handleChatCore({
               "ACCOUNT_SEMAPHORE",
               `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); rotating without queue wait`
             );
+            persistLocalAccountSemaphoreCapacityReject({
+              provider,
+              model,
+              requestedModel,
+              connectionId:
+                connectionId || (executionCredentials?.connectionId as string | undefined) || null,
+              clientRawRequest,
+              apiKeyInfo,
+              startTime,
+              errorCode: code,
+              message: "Selected Codex account is at local concurrency capacity",
+              sourceFormat,
+              targetFormat,
+              snapshot: {
+                connectionIdPrefix: String(
+                  connectionId || executionCredentials?.connectionId || "unknown"
+                ).slice(0, 8),
+                running: localSlot.snapshot.running,
+                maxConcurrency: localSlot.snapshot.maxConcurrency,
+                eligible: false,
+                reason: localSlot.reason,
+              },
+              serviceTier: effectiveServiceTier,
+              comboName,
+              comboStrategy,
+              isCombo,
+              comboStepId,
+              comboExecutionKey,
+            });
             return createLocalAccountSemaphoreCapacityResult(
               HTTP_STATUS.RATE_LIMITED,
               "Selected Codex account is at local concurrency capacity",
