@@ -1095,6 +1095,8 @@ const LOCAL_ACCOUNT_SEMAPHORE_CAPACITY_ERROR_CODES = new Set([
   "SEMAPHORE_QUEUE_FULL",
   "LOCAL_ACCOUNT_SEMAPHORE_FULL",
   "LOCAL_ACCOUNT_SEMAPHORE_BLOCKED",
+  "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT",
+  "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL",
 ]);
 
 function isSemaphoreCapacityError(error: unknown): error is Error & { code: string } {
@@ -3935,37 +3937,8 @@ export async function handleChatCore({
                 : "LOCAL_ACCOUNT_SEMAPHORE_FULL";
             log?.warn?.(
               "ACCOUNT_SEMAPHORE",
-              `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); rotating without queue wait`
+              `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); asking caller to retry another eligible account or queue briefly`
             );
-            persistLocalAccountSemaphoreCapacityReject({
-              provider,
-              model,
-              requestedModel,
-              connectionId:
-                connectionId || (executionCredentials?.connectionId as string | undefined) || null,
-              clientRawRequest,
-              apiKeyInfo,
-              startTime,
-              errorCode: code,
-              message: "Selected Codex account is at local concurrency capacity",
-              sourceFormat,
-              targetFormat,
-              snapshot: {
-                connectionIdPrefix: String(
-                  connectionId || executionCredentials?.connectionId || "unknown"
-                ).slice(0, 8),
-                running: localSlot.snapshot.running,
-                maxConcurrency: localSlot.snapshot.maxConcurrency,
-                eligible: false,
-                reason: localSlot.reason,
-              },
-              serviceTier: effectiveServiceTier,
-              comboName,
-              comboStrategy,
-              isCombo,
-              comboStepId,
-              comboExecutionKey,
-            });
             return createLocalAccountSemaphoreCapacityResult(
               HTTP_STATUS.RATE_LIMITED,
               "Selected Codex account is at local concurrency capacity",
