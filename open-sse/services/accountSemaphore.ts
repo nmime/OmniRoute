@@ -325,7 +325,7 @@ export function tryAcquire(
     };
   }
 
-  const gate = ensureGate(semaphoreKey, maxConcurrency);
+  const gate = ensureGate(semaphoreKey, Number(maxConcurrency));
   clearCleanupTimer(gate);
 
   const blocked = isBlocked(gate);
@@ -491,7 +491,7 @@ export function acquire(
     return Promise.reject(makeAbortError(signal));
   }
 
-  const gate = ensureGate(semaphoreKey, maxConcurrency);
+  const gate = ensureGate(semaphoreKey, Number(maxConcurrency));
   clearCleanupTimer(gate);
 
   if (gate.running < gate.maxConcurrency && !isBlocked(gate)) {

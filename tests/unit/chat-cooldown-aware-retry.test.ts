@@ -382,7 +382,7 @@ test("handleChat routes Codex from saturated selected account to another account
   }
 });
 
-test("handleChat fast-fails local Codex capacity without upstream call or provider poisoning", async () => {
+test("handleChat waits on local Codex capacity then returns queue timeout without upstream call or provider poisoning", async () => {
   const first = await seedConnection("codex", {
     name: "codex-full-a",
     apiKey: "sk-codex-full-a",
@@ -413,6 +413,8 @@ test("handleChat fast-fails local Codex capacity without upstream call or provid
     return buildOpenAIResponse("should not be called");
   };
 
+  const originalTimeout = process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = "40";
   const startedAt = Date.now();
   try {
     const response = await handleChat(
@@ -429,15 +431,19 @@ test("handleChat fast-fails local Codex capacity without upstream call or provid
 
     assert.equal(response.status, 429);
     assert.equal(fetchCalls, 0);
-    assert.ok(elapsedMs < 1_000, `expected fast local capacity failure, got ${elapsedMs}ms`);
-    assert.equal(body.error.code, "LOCAL_ACCOUNT_SEMAPHORE_FULL");
+    assert.ok(elapsedMs < 1_000, `expected bounded local capacity timeout, got ${elapsedMs}ms`);
+    assert.ok(
+      elapsedMs >= 30,
+      `expected request to wait on the local capacity queue, got ${elapsedMs}ms`
+    );
+    assert.equal(body.error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT");
     assert.equal(body.error.type, "account_semaphore_capacity");
 
     const callLogs = await getCallLogs({ status: "429", provider: "codex", limit: 5 });
     const capacityLog = callLogs.find(
       (entry: any) =>
         entry.error &&
-        String(entry.error).includes("LOCAL_ACCOUNT_SEMAPHORE_FULL") &&
+        String(entry.error).includes("LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT") &&
         entry.requestedModel === "codex/gpt-5.5"
     ) as any;
     assert.ok(capacityLog, "expected sanitized local capacity reject call log");
@@ -458,7 +464,8 @@ test("handleChat fast-fails local Codex capacity without upstream call or provid
 
     const usageHistory = await getUsageHistory({ provider: "codex", model: "gpt-5.5" });
     const capacityUsage = usageHistory.find(
-      (entry: any) => entry.status === "429" && entry.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_FULL"
+      (entry: any) =>
+        entry.status === "429" && entry.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
     ) as any;
     assert.ok(capacityUsage, "expected usage_history row for local capacity reject");
     assert.equal(capacityUsage.success, false);
@@ -474,6 +481,11 @@ test("handleChat fast-fails local Codex capacity without upstream call or provid
       assert.equal(connection.backoffLevel, 0);
     }
   } finally {
+    if (originalTimeout === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = originalTimeout;
+    }
     for (const release of releases) release();
   }
 });
