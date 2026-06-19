@@ -1265,6 +1265,7 @@ async function handleSingleModelChat(
         providerProfile,
         cachedSettings: runtimeOptions.cachedSettings,
         skipUpstreamRetry: runtimeOptions.skipUpstreamRetry ?? false,
+        localCapacityEligibleConnectionIds: effectiveAllowedConnections,
       });
       if (telemetry) telemetry.endPhase();
 
@@ -1437,7 +1438,26 @@ async function handleSingleModelChat(
       if (result.errorType === "account_semaphore_capacity") {
         // Local concurrency pressure is not an upstream quota failure. Prefer another
         // account when possible; pinned combo steps fall through to combo orchestration.
-        if (hasForcedConnection) {
+        if (
+          result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL" ||
+          result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
+        ) {
+          const localCapacityCode = String(result.errorCode);
+          return createLocalCapacityResponse(provider, model, {
+            path:
+              clientRawRequest?.endpoint || (request?.url ? new URL(request.url).pathname : null),
+            requestedModel: modelStr,
+            connectionId: credentials.connectionId,
+            apiKeyInfo,
+            errorCode: localCapacityCode,
+            message:
+              localCapacityCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                ? `[${provider}/${model}] Local capacity queue is full; retry shortly`
+                : `[${provider}/${model}] Timed out waiting for local account capacity; retry shortly`,
+            retryAfterSec: 1,
+          });
+        }
+        if (hasForcedConnection && provider !== "codex") {
           return result.response;
         }
 
@@ -1446,19 +1466,30 @@ async function handleSingleModelChat(
           `Account ${accountId}... at local concurrency cap, trying fallback account or waiting briefly for local capacity`
         );
         if (provider === "codex") {
+          const eligibleConnectionsForCapacityWait =
+            Array.isArray(effectiveAllowedConnections) && effectiveAllowedConnections.length > 0
+              ? Array.from(
+                  new Set([
+                    ...effectiveAllowedConnections,
+                    ...(credentials.connectionId ? [credentials.connectionId] : []),
+                  ])
+                )
+              : effectiveAllowedConnections;
           const queuedCredentials = await getProviderCredentialsWithQuotaPreflight(
             provider,
             null,
-            effectiveAllowedConnections,
+            eligibleConnectionsForCapacityWait,
             model,
             {
               sessionKey: runtimeOptions.sessionAffinityKey ?? runtimeOptions.sessionId ?? null,
               excludeConnectionIds: Array.from(excludedConnectionIds),
               waitForLocalCapacity: true,
               signal: requestSignal,
-              ...(runtimeOptions.forcedConnectionId
-                ? { forcedConnectionId: runtimeOptions.forcedConnectionId }
-                : {}),
+              // Re-run capacity-aware account selection across every eligible account after
+              // the bounded local-capacity queue wakes. The selected account is often
+              // already the first account to release; forcing the same connection here
+              // would re-create the fast selected-account 429 path instead of letting
+              // auth choose any currently eligible account.
             }
           );
           if (queuedCredentials?.localCapacityExhausted) {
