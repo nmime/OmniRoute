@@ -1690,6 +1690,7 @@ export async function handleChatCore({
   cachedSettings = null,
   skipUpstreamRetry = false,
   createPiiTransform = null,
+  localCapacityEligibleConnectionIds = null,
 }) {
   let { provider, model, extendedContext } = modelInfo;
   // ── Memory pressure guard ────────────────────────────────────────────
@@ -3823,12 +3824,12 @@ export async function handleChatCore({
 
   const executeProviderRequest = async (modelToCall = effectiveModel, allowDedup = false) => {
     const execute = async () => {
-      const executionCredentials = getExecutionCredentials();
+      let executionCredentials = getExecutionCredentials();
       // Track execution credentials for key health recording (to capture selectedKeyId)
       let lastExecCreds = executionCredentials;
-      const accountSemaphoreMaxConcurrency =
+      let accountSemaphoreMaxConcurrency =
         resolveAccountSemaphoreMaxConcurrency(executionCredentials);
-      const accountSemaphoreKey = resolveAccountSemaphoreKey({
+      let accountSemaphoreKey = resolveAccountSemaphoreKey({
         provider,
         model: modelToCall,
         connectionId,
@@ -3925,27 +3926,99 @@ export async function handleChatCore({
         max: accountSemaphoreMaxConcurrency,
       });
       let acquireAccountSemaphoreRelease = () => {};
+      let accountSemaphoreAcquired = false;
       if (accountSemaphoreKey && accountSemaphoreMaxConcurrency != null) {
         if (provider === "codex") {
-          const localSlot = tryAcquireAccountSemaphore(accountSemaphoreKey, {
-            maxConcurrency: accountSemaphoreMaxConcurrency,
-          });
-          if (!localSlot.acquired) {
-            const code =
-              localSlot.reason === "blocked"
-                ? "LOCAL_ACCOUNT_SEMAPHORE_BLOCKED"
-                : "LOCAL_ACCOUNT_SEMAPHORE_FULL";
+          const maxCapacitySelectionAttempts = 3;
+          for (
+            let capacityAttempt = 0;
+            capacityAttempt < maxCapacitySelectionAttempts;
+            capacityAttempt++
+          ) {
+            const localSlot = tryAcquireAccountSemaphore(accountSemaphoreKey, {
+              maxConcurrency: accountSemaphoreMaxConcurrency,
+            });
+            if (localSlot.acquired) {
+              acquireAccountSemaphoreRelease = localSlot.release;
+              accountSemaphoreAcquired = true;
+              break;
+            }
+
             log?.warn?.(
               "ACCOUNT_SEMAPHORE",
-              `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); asking caller to retry another eligible account or queue briefly`
+              `Codex account ${String(connectionId || executionCredentials?.connectionId || "unknown").slice(0, 8)} at local capacity (${localSlot.snapshot.running}/${localSlot.snapshot.maxConcurrency}); waiting on bounded local capacity queue before reselecting`
             );
+
+            updatePendingRequest(model, provider, connectionId, {
+              stage: "waiting_account_slot",
+            });
+
+            const eligibleConnectionIds = Array.isArray(localCapacityEligibleConnectionIds)
+              ? localCapacityEligibleConnectionIds.filter(
+                  (id): id is string => typeof id === "string" && id.trim().length > 0
+                )
+              : null;
+            const queuedCredentials = await getProviderCredentials(
+              "codex",
+              null,
+              eligibleConnectionIds && eligibleConnectionIds.length > 0
+                ? eligibleConnectionIds
+                : null,
+              modelToCall,
+              {
+                waitForLocalCapacity: true,
+                signal: streamController.signal,
+                sessionKey: extractSessionAffinityKey(body, clientRawRequest?.headers) ?? null,
+              }
+            ).catch((error) => {
+              if ((error as Error)?.name === "AbortError") throw error;
+              return null;
+            });
+
+            if (!queuedCredentials || "allRateLimited" in queuedCredentials) {
+              const localCapacityReason =
+                typeof queuedCredentials?.localCapacityQueueReason === "string"
+                  ? queuedCredentials.localCapacityQueueReason
+                  : "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT";
+              const code =
+                localCapacityReason === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                  ? "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                  : "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT";
+              return createLocalAccountSemaphoreCapacityResult(
+                HTTP_STATUS.RATE_LIMITED,
+                code === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL"
+                  ? "Local Codex account capacity queue is full"
+                  : "Timed out waiting for local Codex account capacity",
+                code
+              );
+            }
+
+            Object.assign(credentials, queuedCredentials);
+            connectionId = queuedCredentials.connectionId || connectionId;
+            executionCredentials = getExecutionCredentials();
+            lastExecCreds = executionCredentials;
+            accountSemaphoreMaxConcurrency =
+              resolveAccountSemaphoreMaxConcurrency(executionCredentials);
+            accountSemaphoreKey = resolveAccountSemaphoreKey({
+              provider,
+              model: modelToCall,
+              connectionId,
+              credentials: executionCredentials,
+            });
+
+            if (!accountSemaphoreKey || accountSemaphoreMaxConcurrency == null) {
+              accountSemaphoreAcquired = true;
+              break;
+            }
+          }
+
+          if (!accountSemaphoreAcquired) {
             return createLocalAccountSemaphoreCapacityResult(
               HTTP_STATUS.RATE_LIMITED,
-              "Selected Codex account is at local concurrency capacity",
-              code
+              "Timed out waiting for local Codex account capacity",
+              "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
             );
           }
-          acquireAccountSemaphoreRelease = localSlot.release;
         } else {
           updatePendingRequest(model, provider, connectionId, {
             stage: "waiting_account_slot",

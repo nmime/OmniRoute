@@ -1159,11 +1159,22 @@ export async function getProviderCredentials(
             if (maxConcurrency > 0) {
               localCapacityKeys.push({ key: semaphoreKey, maxConcurrency });
             }
+            const blockedUntilMs = snapshot?.blockedUntil
+              ? new Date(snapshot.blockedUntil).getTime()
+              : null;
+            const isBlocked =
+              blockedUntilMs !== null && Number.isFinite(blockedUntilMs)
+                ? blockedUntilMs > Date.now()
+                : false;
             return {
               connectionIdPrefix: connection.id ? connection.id.slice(0, 8) : null,
               running: snapshot?.running ?? 0,
               maxConcurrency: maxConcurrency > 0 ? maxConcurrency : null,
-              eligible: maxConcurrency <= 0 || !snapshot || snapshot.running < maxConcurrency,
+              blockedUntil: snapshot?.blockedUntil ?? null,
+              eligible:
+                maxConcurrency <= 0 ||
+                !snapshot ||
+                (!isBlocked && snapshot.running < maxConcurrency),
             };
           })
         : [];
@@ -1409,7 +1420,7 @@ export async function getProviderCredentials(
     }> = [];
 
     if (!bypassQuotaPolicy) {
-      policyEligibleConnections = availableConnections.filter((connection) => {
+      policyEligibleConnections = capacityEligibleConnections.filter((connection) => {
         const evaluation = evaluateQuotaLimitPolicy(provider, connection);
         if (!evaluation.blocked) return true;
 

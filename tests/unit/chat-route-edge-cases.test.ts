@@ -24,6 +24,7 @@ const { setModelAlias } = await import("../../src/lib/db/models.ts");
 const accountSemaphore = await import("../../open-sse/services/accountSemaphore.ts");
 const providersDb = await import("../../src/lib/db/providers.ts");
 const { getCallLogs, getCallLogById } = await import("../../src/lib/usage/callLogs.ts");
+const { handleChatCore } = await import("../../open-sse/handlers/chatCore.ts");
 
 test.beforeEach(async () => {
   BaseExecutor.RETRY_CONFIG.delayMs = 0;
@@ -87,6 +88,90 @@ test("handleChat queues codex local capacity bursts then routes after a release"
   assert.equal(accountSemaphore.getStats()[keyB]?.running ?? 0, 0);
 
   releaseA();
+});
+
+test("chatCore codex selected-account capacity race waits then reselects before upstream", async () => {
+  const accountA = await seedConnection("codex", {
+    name: "codex-forced-cap-a",
+    apiKey: "sk-codex-forced-cap-a",
+    maxConcurrent: 1,
+  });
+  const accountB = await seedConnection("codex", {
+    name: "codex-forced-cap-b",
+    apiKey: "sk-codex-forced-cap-b",
+    maxConcurrent: 1,
+  });
+  const keyA = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountA.id,
+  });
+  const keyB = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountB.id,
+  });
+  const releaseA = await accountSemaphore.acquire(keyA, { maxConcurrency: 1, timeoutMs: 100 });
+  const releaseB = await accountSemaphore.acquire(keyB, { maxConcurrency: 1, timeoutMs: 100 });
+  const originalTimeout = process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = "500";
+  let upstreamCalls = 0;
+
+  globalThis.fetch = async () => {
+    upstreamCalls++;
+    return buildOpenAIResponse("Forced queued codex response");
+  };
+
+  try {
+    const responsePromise = handleChatCore({
+      body: {
+        model: "codex/gpt-5",
+        stream: false,
+        messages: [{ role: "user", content: "forced selected cap race" }],
+      },
+      modelInfo: { provider: "codex", model: "gpt-5", extendedContext: false },
+      credentials: {
+        apiKey: accountA.apiKey,
+        providerSpecificData: accountA.providerSpecificData ?? {},
+        connectionId: accountA.id,
+        maxConcurrent: 1,
+      },
+      connectionId: accountA.id,
+      log: {
+        debug() {},
+        info() {},
+        warn() {},
+        error() {},
+      },
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {
+          model: "codex/gpt-5",
+          stream: false,
+          messages: [{ role: "user", content: "forced selected cap race" }],
+        },
+        headers: new Headers({ accept: "application/json" }),
+      },
+      userAgent: "unit-test",
+      localCapacityEligibleConnectionIds: [accountA.id, accountB.id],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(upstreamCalls, 0, "must not call upstream before a local slot is acquired");
+    releaseB();
+
+    const result = await responsePromise;
+    assert.equal(result.success, true);
+    assert.equal(result.response.status, 200);
+    assert.equal(upstreamCalls, 1);
+    assert.equal(accountSemaphore.getStats()[keyB]?.running ?? 0, 0);
+  } finally {
+    if (originalTimeout === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = originalTimeout;
+    }
+    releaseA();
+    releaseB();
+  }
 });
 
 test("handleChat returns sanitized 429 when codex local capacity queue times out", async () => {
