@@ -2,7 +2,7 @@ import { handleChat } from "@/sse/handlers/chat";
 import { withEarlyStreamKeepalive } from "@omniroute/open-sse/utils/earlyStreamKeepalive";
 import { withInjectionGuard } from "@/middleware/promptInjectionGuard";
 import { resolveResponsesApiModel } from "@/app/api/internal/codex-responses-ws/modelResolution";
-import { getModelInfo } from "@/sse/services/model";
+import { getModelInfo, resolveConfiguredModelAlias } from "@/sse/services/model";
 import { getComboByName } from "@/lib/db/combos";
 import { resolveKeepaliveThreshold } from "@omniroute/open-sse/utils/keepaliveThreshold";
 import { requireClientApiAuth } from "@/server/authz/requireClientApiAuth";
@@ -44,7 +44,8 @@ export async function withCodexPreferredModel(request: Request): Promise<Request
     const { model, changed } = await resolveResponsesApiModel(
       body.model,
       getModelInfo,
-      async (name) => !!(await getComboByName(name))
+      async (name) => !!(await getComboByName(name)),
+      resolveConfiguredModelAlias
     );
     if (!changed) return request;
 

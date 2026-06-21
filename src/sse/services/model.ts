@@ -48,6 +48,15 @@ export async function resolveModelAlias(alias) {
 }
 
 /**
+ * Resolve a dashboard-configured model alias using the same merged alias sources
+ * as request routing (DB aliases plus Settings UI aliases, with Settings winning).
+ */
+export async function resolveConfiguredModelAlias(alias) {
+  const aliases = await getCombinedModelAliases();
+  return resolveModelAliasFromMap(alias, aliases);
+}
+
+/**
  * Look up custom-model metadata from the DB in a single read:
  *  - apiFormat: "responses" when the model is configured for the Responses API.
  *  - targetFormat: the optional per-model wire format override (#2905).

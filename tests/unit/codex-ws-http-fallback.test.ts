@@ -27,6 +27,59 @@ test("bare gpt-5.5 that resolves to codex is rewritten to codex/gpt-5.5", async 
   assert.equal(result.changed, true);
 });
 
+test("bare gpt-5.5 with explicit openai-compatible dashboard alias is not rewritten to Codex", async () => {
+  const calls: string[] = [];
+  const resolve: ModelResolver = async (id: string) => {
+    calls.push(id);
+    return (
+      {
+        "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
+        "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
+      }[id] ?? {}
+    );
+  };
+  const explicit = async (id: string) =>
+    id === "gpt-5.5"
+      ? {
+          provider: "openai-compatible-chat-93db733c-9e86-4777-9d0a-d1c336141559",
+          model: "gpt-5.5",
+        }
+      : null;
+
+  const result = await resolveResponsesApiModel("gpt-5.5", resolve, async () => false, explicit);
+  assert.equal(result.model, "gpt-5.5");
+  assert.equal(result.changed, false);
+  assert.deepEqual(calls, [], "explicit non-codex alias should short-circuit codex retry");
+});
+
+test("bare gpt-5.5 with no explicit dashboard alias still falls back to Codex", async () => {
+  const resolve = makeResolver({
+    "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
+    "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
+  });
+  const result = await resolveResponsesApiModel(
+    "gpt-5.5",
+    resolve,
+    async () => false,
+    async () => null
+  );
+  assert.equal(result.model, "codex/gpt-5.5");
+  assert.equal(result.changed, true);
+});
+
+test("bare gpt-5.5 with explicit Codex dashboard alias is rewritten to codex/gpt-5.5", async () => {
+  const resolve = makeResolver({
+    "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
+    "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
+  });
+  const explicit = async (id: string) =>
+    id === "gpt-5.5" ? { provider: "codex", model: "gpt-5.5" } : null;
+
+  const result = await resolveResponsesApiModel("gpt-5.5", resolve, async () => false, explicit);
+  assert.equal(result.model, "codex/gpt-5.5");
+  assert.equal(result.changed, true);
+});
+
 test("bare gpt-4o that has no codex mapping is passed through unchanged", async () => {
   const resolve = makeResolver({
     "gpt-4o": { provider: "openai", model: "gpt-4o" },

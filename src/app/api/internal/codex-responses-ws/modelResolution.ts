@@ -23,6 +23,10 @@ export interface ResolvedModelInfo {
 
 export type ModelResolver = (modelStr: string) => Promise<ResolvedModelInfo>;
 
+export type ExplicitModelResolver = (
+  modelStr: string
+) => Promise<ResolvedModelInfo | null | undefined> | ResolvedModelInfo | null | undefined;
+
 /**
  * Resolve a Responses-WebSocket model id, preferring the codex provider.
  *
@@ -60,13 +64,17 @@ export async function resolveCodexWsModelInfo(
  * @param resolve a getModelInfo-style resolver
  * @param isCombo optional predicate — when the bare id is a combo name, skip the codex
  *        rewrite so downstream combo routing resolves it (#3227/#3233).
+ * @param resolveExplicit optional dashboard-alias/provider-mapping resolver — when the
+ *        bare id explicitly maps to a non-codex provider, skip the codex rewrite so
+ *        dashboard distribution wins over the Codex CLI HTTP fallback preference.
  * @returns { model, changed } — model is the (possibly rewritten) id;
  *          changed=true means a codex/ prefix was applied.
  */
 export async function resolveResponsesApiModel(
   requestedModel: string,
   resolve: ModelResolver,
-  isCombo?: (name: string) => Promise<boolean> | boolean
+  isCombo?: (name: string) => Promise<boolean> | boolean,
+  resolveExplicit?: ExplicitModelResolver
 ): Promise<{ model: string; changed: boolean }> {
   if (!requestedModel || requestedModel.includes("/")) {
     return { model: requestedModel, changed: false };
@@ -88,6 +96,27 @@ export async function resolveResponsesApiModel(
       if (await isCombo(requestedModel)) return { model: requestedModel, changed: false };
     } catch {
       // combo lookup unavailable — fall through to normal codex-preference resolution
+    }
+  }
+
+  // Dashboard-configured model aliases/provider mappings are explicit routing choices.
+  // Honor those before applying the Codex CLI HTTP fallback preference for bare
+  // ChatGPT-style IDs. Otherwise an alias like
+  // "gpt-5.5" -> "openai-compatible-chat-.../gpt-5.5" would be shadowed by
+  // the permissive codex/<model> retry below and incorrectly routed to Codex.
+  if (resolveExplicit) {
+    try {
+      const explicit = await resolveExplicit(requestedModel);
+      if (explicit?.provider) {
+        if (explicit.provider !== "codex") {
+          return { model: requestedModel, changed: false };
+        }
+
+        const prefixed = `codex/${explicit.model || requestedModel}`;
+        return { model: prefixed, changed: true };
+      }
+    } catch {
+      // Explicit mapping lookup unavailable — fall through to existing codex preference.
     }
   }
 
