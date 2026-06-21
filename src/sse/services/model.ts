@@ -53,7 +53,18 @@ export async function resolveModelAlias(alias) {
  */
 export async function resolveConfiguredModelAlias(alias) {
   const aliases = await getCombinedModelAliases();
-  return resolveModelAliasFromMap(alias, aliases);
+  const resolved = resolveModelAliasFromMap(alias, aliases);
+  if (!resolved?.provider || !resolved?.model) return resolved;
+
+  const { apiFormat, targetFormat } = await lookupCustomModelMeta(
+    String(resolved.provider),
+    String(resolved.model)
+  );
+  return {
+    ...resolved,
+    ...(apiFormat && { apiFormat }),
+    ...(targetFormat && { targetFormat }),
+  };
 }
 
 /**

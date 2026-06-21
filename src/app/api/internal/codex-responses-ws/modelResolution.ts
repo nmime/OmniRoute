@@ -27,6 +27,36 @@ export type ExplicitModelResolver = (
   modelStr: string
 ) => Promise<ResolvedModelInfo | null | undefined> | ResolvedModelInfo | null | undefined;
 
+function isOpenAICompatibleProvider(provider: unknown): provider is string {
+  return typeof provider === "string" && provider.startsWith("openai-compatible-");
+}
+
+function isResponsesCapableOpenAICompatible(info: ResolvedModelInfo): boolean {
+  if (info.apiFormat === "responses" || info.targetFormat === "openai-responses") {
+    return true;
+  }
+
+  return typeof info.provider === "string" && info.provider.includes("responses");
+}
+
+function shouldHonorExplicitResponsesAlias(info: ResolvedModelInfo): boolean {
+  if (!info.provider) return false;
+  if (info.provider === "codex") return true;
+
+  // OpenAI-compatible custom providers are endpoint-shape specific. A dashboard
+  // alias pointing at a chat-only compatible provider must not steal
+  // /v1/responses traffic from the Codex fallback path; only response-capable
+  // compatible providers (provider apiType=responses or model apiFormat=responses)
+  // can safely receive Responses API requests here.
+  if (isOpenAICompatibleProvider(info.provider)) {
+    return isResponsesCapableOpenAICompatible(info);
+  }
+
+  // Built-in/non-compatible providers already have explicit translator paths in
+  // the main chat pipeline, so preserve their dashboard alias behavior.
+  return true;
+}
+
 /**
  * Resolve a Responses-WebSocket model id, preferring the codex provider.
  *
@@ -65,17 +95,19 @@ export async function resolveCodexWsModelInfo(
  * @param isCombo optional predicate — when the bare id is a combo name, skip the codex
  *        rewrite so downstream combo routing resolves it (#3227/#3233).
  * @param resolveExplicit optional dashboard-alias/provider-mapping resolver — when the
- *        bare id explicitly maps to a non-codex provider, skip the codex rewrite so
- *        dashboard distribution wins over the Codex CLI HTTP fallback preference.
- * @returns { model, changed } — model is the (possibly rewritten) id;
- *          changed=true means a codex/ prefix was applied.
+ *        bare id explicitly maps to a Responses-capable provider, skip the codex rewrite
+ *        so dashboard distribution wins over the Codex CLI HTTP fallback preference.
+ * @returns { model, changed, error? } — model is the (possibly rewritten) id;
+ *          changed=true means a codex/ prefix was applied. error is set when a
+ *          dashboard alias targets a provider that cannot handle Responses API
+ *          traffic and no compatible Codex fallback exists.
  */
 export async function resolveResponsesApiModel(
   requestedModel: string,
   resolve: ModelResolver,
   isCombo?: (name: string) => Promise<boolean> | boolean,
   resolveExplicit?: ExplicitModelResolver
-): Promise<{ model: string; changed: boolean }> {
+): Promise<{ model: string; changed: boolean; error?: string }> {
   if (!requestedModel || requestedModel.includes("/")) {
     return { model: requestedModel, changed: false };
   }
@@ -104,16 +136,21 @@ export async function resolveResponsesApiModel(
   // ChatGPT-style IDs. Otherwise an alias like
   // "gpt-5.5" -> "openai-compatible-chat-.../gpt-5.5" would be shadowed by
   // the permissive codex/<model> retry below and incorrectly routed to Codex.
+  let unsupportedExplicitResponsesAlias: ResolvedModelInfo | null = null;
   if (resolveExplicit) {
     try {
       const explicit = await resolveExplicit(requestedModel);
       if (explicit?.provider) {
-        if (explicit.provider !== "codex") {
-          return { model: requestedModel, changed: false };
-        }
+        if (!shouldHonorExplicitResponsesAlias(explicit)) {
+          unsupportedExplicitResponsesAlias = explicit;
+        } else {
+          if (explicit.provider !== "codex") {
+            return { model: requestedModel, changed: false };
+          }
 
-        const prefixed = `codex/${explicit.model || requestedModel}`;
-        return { model: prefixed, changed: true };
+          const prefixed = `codex/${explicit.model || requestedModel}`;
+          return { model: prefixed, changed: true };
+        }
       }
     } catch {
       // Explicit mapping lookup unavailable — fall through to existing codex preference.
@@ -123,6 +160,14 @@ export async function resolveResponsesApiModel(
   try {
     const resolved = await resolveCodexWsModelInfo(requestedModel, resolve);
     if (resolved?.provider !== "codex") {
+      if (unsupportedExplicitResponsesAlias) {
+        const error = `Model alias '${requestedModel}' targets a chat-only OpenAI-compatible provider that cannot serve /v1/responses. Use /v1/chat/completions, configure the provider/model for Responses API, or request a provider-prefixed Responses-capable model.`;
+        return {
+          model: requestedModel,
+          changed: false,
+          error,
+        };
+      }
       return { model: requestedModel, changed: false };
     }
 

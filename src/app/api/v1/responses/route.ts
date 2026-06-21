@@ -34,19 +34,28 @@ export async function OPTIONS() {
  * Safe: only rewrites when codex/model is genuinely registered; all other models
  * pass through unchanged. Errors are caught and the original request is returned.
  */
-export async function withCodexPreferredModel(request: Request): Promise<Request> {
+export async function withCodexPreferredModel(request: Request): Promise<Request | Response> {
   try {
     const clone = request.clone();
     const body = await clone.json().catch(() => null);
     if (!body || typeof body !== "object" || typeof body.model !== "string") {
       return request;
     }
-    const { model, changed } = await resolveResponsesApiModel(
+    const { model, changed, error } = await resolveResponsesApiModel(
       body.model,
       getModelInfo,
       async (name) => !!(await getComboByName(name)),
       resolveConfiguredModelAlias
     );
+    if (error) {
+      return new Response(
+        JSON.stringify({ error: { message: error, type: "invalid_request_error" } }),
+        {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
     if (!changed) return request;
 
     return new Request(request.url, {
@@ -70,6 +79,7 @@ async function postHandler(request, context) {
   // warm with early keepalives while the upstream produces its first token (#2544).
   // Non-streaming callers (JSON) keep the original verbatim path untouched.
   const resolved = await withCodexPreferredModel(request);
+  if (resolved instanceof Response) return resolved;
   const accept = String(request.headers?.get?.("accept") || "").toLowerCase();
   if (accept.includes("text/event-stream")) {
     // Adaptive threshold: web-session and anonymous-fallback providers are slower

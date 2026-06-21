@@ -38,8 +38,81 @@ test("a bare ChatGPT model id is still codex-preferred (Codex CLI WS→HTTP fall
   assert.equal(out.model, "codex/gpt-5.5");
 });
 
+test("a /v1/responses dashboard alias to chat-only OpenAI-compatible falls back to codex", async () => {
+  const isCombo = async () => false;
+  const resolveExplicit = async () => ({
+    provider: "openai-compatible-chat-93db7",
+    model: "gpt-5.5",
+  });
+
+  const out = await resolveResponsesApiModel("gpt-5.5", resolver, isCombo, resolveExplicit);
+
+  assert.equal(out.changed, true);
+  assert.equal(out.model, "codex/gpt-5.5");
+  assert.equal(out.error, undefined);
+});
+
+test("a /v1/responses dashboard alias to a Responses-capable custom provider is honored", async () => {
+  const isCombo = async () => false;
+  const resolveExplicit = async () => ({
+    provider: "openai-compatible-chat-custom",
+    model: "gpt-5.5",
+    apiFormat: "responses",
+  });
+
+  const out = await resolveResponsesApiModel("gpt-5.5", resolver, isCombo, resolveExplicit);
+
+  assert.equal(out.changed, false);
+  assert.equal(out.model, "gpt-5.5");
+  assert.equal(out.error, undefined);
+});
+
+test("an explicit provider-prefixed Responses request remains unchanged", async () => {
+  const out = await resolveResponsesApiModel(
+    "ar-op/gpt-5.5",
+    async () => {
+      throw new Error("provider-prefixed models should not be re-resolved");
+    },
+    async () => {
+      throw new Error("provider-prefixed models should not be checked as combos");
+    },
+    async () => {
+      throw new Error("provider-prefixed models should not be checked as aliases");
+    }
+  );
+
+  assert.equal(out.changed, false);
+  assert.equal(out.model, "ar-op/gpt-5.5");
+});
+
+test("a chat-only OpenAI-compatible responses alias returns a clear error when codex is unavailable", async () => {
+  const noCodexResolver = async (modelStr: string) => ({
+    provider: "openai",
+    model: modelStr,
+  });
+  const resolveExplicit = async () => ({
+    provider: "openai-compatible-chat-93db7",
+    model: "gpt-5.5",
+  });
+
+  const out = await resolveResponsesApiModel(
+    "gpt-5.5",
+    noCodexResolver,
+    async () => false,
+    resolveExplicit
+  );
+
+  assert.equal(out.changed, false);
+  assert.equal(out.model, "gpt-5.5");
+  assert.match(out.error || "", /chat-only OpenAI-compatible provider/);
+});
+
 test("provider-prefixed ids pass through unchanged", async () => {
-  const out = await resolveResponsesApiModel("anthropic/claude-opus-4-8", resolver, async () => false);
+  const out = await resolveResponsesApiModel(
+    "anthropic/claude-opus-4-8",
+    resolver,
+    async () => false
+  );
   assert.equal(out.changed, false);
   assert.equal(out.model, "anthropic/claude-opus-4-8");
 });
