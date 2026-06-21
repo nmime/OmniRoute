@@ -8,6 +8,44 @@ const { openaiResponsesToOpenAIRequest, openaiToOpenAIResponsesRequest } =
 // Responses API -> Chat Completions direction
 // ──────────────────────────────────────────────────────────────────────────────
 
+test("openaiResponsesToOpenAIRequest: converts string input to a user message", () => {
+  const body = {
+    model: "gpt-5.5",
+    instructions: "Be concise.",
+    input: "Say hello",
+  };
+
+  const result = openaiResponsesToOpenAIRequest("gpt-5.5", body, false, {});
+  const messages = (result as any).messages;
+
+  assert.deepEqual(messages, [
+    { role: "system", content: "Be concise." },
+    { role: "user", content: [{ type: "text", text: "Say hello" }] },
+  ]);
+  assert.equal((result as any).input, undefined);
+  assert.equal((result as any).instructions, undefined);
+});
+
+test("openaiResponsesToOpenAIRequest: converts role-based string content input array", () => {
+  const body = {
+    model: "gpt-5.5",
+    input: [
+      { role: "user", content: "First" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Second" }] },
+      "Third",
+    ],
+  };
+
+  const result = openaiResponsesToOpenAIRequest("gpt-5.5", body, false, {});
+  const messages = (result as any).messages;
+
+  assert.deepEqual(messages, [
+    { role: "user", content: [{ type: "text", text: "First" }] },
+    { role: "assistant", content: [{ type: "text", text: "Second" }] },
+    { role: "user", content: [{ type: "text", text: "Third" }] },
+  ]);
+});
+
 test("openaiResponsesToOpenAIRequest: skips function_call items with empty name", () => {
   const body = {
     model: "gpt-4",

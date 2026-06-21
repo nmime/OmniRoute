@@ -74,6 +74,68 @@ function unsupportedFeature(message: string): Error & { statusCode: number; erro
   return error;
 }
 
+function normalizeResponseContent(value: unknown): unknown {
+  if (typeof value === "string") {
+    return [{ type: "input_text", text: value }];
+  }
+
+  if (!Array.isArray(value)) return value;
+
+  return value.map((contentValue) => {
+    const contentItem = toRecord(contentValue);
+    if (contentItem.type === "text") {
+      return { ...contentItem, type: "input_text" };
+    }
+    return contentValue;
+  });
+}
+
+function normalizeResponsesInputItem(value: unknown): unknown {
+  if (typeof value === "string") {
+    return {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: value }],
+    };
+  }
+
+  const item = toRecord(value);
+  if (!item || Object.keys(item).length === 0) return value;
+
+  if (item.type || item.role) {
+    return {
+      ...item,
+      type: toString(item.type) || "message",
+      role: toString(item.role, "user"),
+      ...(item.content !== undefined ? { content: normalizeResponseContent(item.content) } : {}),
+    };
+  }
+
+  if (typeof item.text === "string") {
+    return {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: item.text }],
+    };
+  }
+
+  return value;
+}
+
+function normalizeResponsesInput(root: JsonRecord): JsonRecord {
+  if (root.input === undefined) return root;
+
+  if (typeof root.input === "string") {
+    return { ...root, input: [normalizeResponsesInputItem(root.input)] };
+  }
+
+  if (Array.isArray(root.input)) {
+    return { ...root, input: root.input.map(normalizeResponsesInputItem) };
+  }
+
+  return { ...root, input: [normalizeResponsesInputItem(root.input)] };
+}
+
 /**
  * Convert OpenAI Responses API request to OpenAI Chat Completions format
  */
@@ -122,7 +184,8 @@ export function openaiResponsesToOpenAIRequest(
     }
   }
 
-  const result: JsonRecord = { ...root };
+  const normalizedRoot = normalizeResponsesInput(root);
+  const result: JsonRecord = { ...normalizedRoot };
 
   // GPT-5 verbosity: Responses `text.verbosity` → Chat Completions top-level `verbosity`.
   // Chat has no `text` wrapper, so carry the level across and drop the Responses-only
@@ -155,15 +218,15 @@ export function openaiResponsesToOpenAIRequest(
   result.messages = messages;
 
   // Convert instructions to system message
-  if (typeof root.instructions === "string" && root.instructions.length > 0) {
-    messages.push({ role: "system", content: root.instructions });
+  if (typeof normalizedRoot.instructions === "string" && normalizedRoot.instructions.length > 0) {
+    messages.push({ role: "system", content: normalizedRoot.instructions });
   }
 
   // Group items by conversation turn
   let currentAssistantMsg: JsonRecord | null = null;
   let pendingToolResults: JsonRecord[] = [];
 
-  const inputItems = toArray(root.input);
+  const inputItems = toArray(normalizedRoot.input);
   for (const itemValue of inputItems) {
     const item = toRecord(itemValue);
 
@@ -304,8 +367,8 @@ export function openaiResponsesToOpenAIRequest(
   }
 
   // Convert tools format
-  if (Array.isArray(root.tools)) {
-    result.tools = root.tools
+  if (Array.isArray(normalizedRoot.tools)) {
+    result.tools = normalizedRoot.tools
       .filter((toolValue) => {
         const tool = toRecord(toolValue);
         const toolType = toString(tool.type);
@@ -335,10 +398,11 @@ export function openaiResponsesToOpenAIRequest(
               function: {
                 name: toString(sub.name),
                 description: toString(sub.description),
-                parameters: sub.parameters ?? sub.input_schema ?? {
-                  type: "object",
-                  properties: {},
-                },
+                parameters: sub.parameters ??
+                  sub.input_schema ?? {
+                    type: "object",
+                    properties: {},
+                  },
               },
             }));
         }
@@ -433,8 +497,8 @@ export function openaiResponsesToOpenAIRequest(
   delete result.input;
   delete result.instructions;
   delete result.include;
-  if (storeEnabled && root.store !== undefined) {
-    result[RESPONSES_STORE_MARKER] = root.store;
+  if (storeEnabled && normalizedRoot.store !== undefined) {
+    result[RESPONSES_STORE_MARKER] = normalizedRoot.store;
   }
   delete result.store;
 
@@ -443,11 +507,11 @@ export function openaiResponsesToOpenAIRequest(
   // Gated by the UA marker from translateRequest; other clients see `reasoning` dropped.
   if (
     credentialRecord._copilotClient === true &&
-    root.reasoning &&
-    typeof root.reasoning === "object" &&
-    !Array.isArray(root.reasoning)
+    normalizedRoot.reasoning &&
+    typeof normalizedRoot.reasoning === "object" &&
+    !Array.isArray(normalizedRoot.reasoning)
   ) {
-    const reasoningRec = toRecord(root.reasoning);
+    const reasoningRec = toRecord(normalizedRoot.reasoning);
     const effort = toString(reasoningRec.effort);
     if (effort && result.reasoning_effort === undefined) {
       result.reasoning_effort = normalizeResponsesReasoningEffort(effort);

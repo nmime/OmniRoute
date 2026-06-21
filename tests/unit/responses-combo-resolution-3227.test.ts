@@ -38,7 +38,7 @@ test("a bare ChatGPT model id is still codex-preferred (Codex CLI WS→HTTP fall
   assert.equal(out.model, "codex/gpt-5.5");
 });
 
-test("a /v1/responses dashboard alias to chat-only OpenAI-compatible falls back to codex", async () => {
+test("a /v1/responses dashboard alias to chat-capable OpenAI-compatible is honored", async () => {
   const isCombo = async () => false;
   const resolveExplicit = async () => ({
     provider: "openai-compatible-chat-93db7",
@@ -47,8 +47,8 @@ test("a /v1/responses dashboard alias to chat-only OpenAI-compatible falls back 
 
   const out = await resolveResponsesApiModel("gpt-5.5", resolver, isCombo, resolveExplicit);
 
-  assert.equal(out.changed, true);
-  assert.equal(out.model, "codex/gpt-5.5");
+  assert.equal(out.changed, false);
+  assert.equal(out.model, "gpt-5.5");
   assert.equal(out.error, undefined);
 });
 
@@ -85,13 +85,13 @@ test("an explicit provider-prefixed Responses request remains unchanged", async 
   assert.equal(out.model, "ar-op/gpt-5.5");
 });
 
-test("a chat-only OpenAI-compatible responses alias returns a clear error when codex is unavailable", async () => {
+test("an unsupported OpenAI-compatible endpoint alias returns a clear error when codex is unavailable", async () => {
   const noCodexResolver = async (modelStr: string) => ({
     provider: "openai",
     model: modelStr,
   });
   const resolveExplicit = async () => ({
-    provider: "openai-compatible-chat-93db7",
+    provider: "openai-compatible-embeddings-93db7",
     model: "gpt-5.5",
   });
 
@@ -104,7 +104,7 @@ test("a chat-only OpenAI-compatible responses alias returns a clear error when c
 
   assert.equal(out.changed, false);
   assert.equal(out.model, "gpt-5.5");
-  assert.match(out.error || "", /chat-only OpenAI-compatible provider/);
+  assert.match(out.error || "", /cannot serve \/v1\/responses/);
 });
 
 test("provider-prefixed ids pass through unchanged", async () => {
