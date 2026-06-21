@@ -3,7 +3,8 @@ import { checkIdempotencyCache } from "./chatCore/idempotency.ts";
 import { checkSemanticCache } from "./chatCore/semanticCache.ts";
 import { sanitizeChatRequestBody } from "./chatCore/sanitization.ts";
 import { cloneBoundedChatLogPayload, truncateForLog } from "./chatCore/logTruncation.ts";
-import { getHeaderValueCaseInsensitive } from "./chatCore/headers.ts";
+import { getHeaderValueCaseInsensitive, isNoMemoryRequested } from "./chatCore/headers.ts";
+import { markCodexScopeRateLimited } from "./chatCore/codexFailover.ts";
 import { getCombosCached, getUpstreamProxyConfigCached } from "./chatCore/comboContextCache.ts";
 export { clearCombosCache, clearUpstreamProxyConfigCache } from "./chatCore/comboContextCache.ts";
 import {
@@ -40,7 +41,7 @@ import {
   resolveMemoryOwnerId,
 } from "./chatCore/memoryExtraction.ts";
 import { CORS_HEADERS } from "../utils/cors.ts";
-import { HEAP_PRESSURE_THRESHOLD_MB } from "../utils/heapPressure.ts";
+import { checkHeapPressureGuard } from "../utils/heapPressure.ts";
 import { normalizeHeaders } from "../utils/headers.ts";
 import { detectFormatFromEndpoint, getTargetFormat } from "../services/provider.ts";
 import { injectSystemPrompt } from "../services/systemPrompt.ts";
@@ -802,27 +803,8 @@ export async function handleChatCore({
   // cascading OOM when many large-context requests arrive concurrently.
   try {
     const heapUsedMB = process.memoryUsage().heapUsed / (1024 * 1024);
-    if (heapUsedMB > HEAP_PRESSURE_THRESHOLD_MB) {
-      // Internal telemetry only — never expose the heap figure to clients (Hard Rule #12).
-      console.warn(
-        `[chatCore] heap pressure guard tripped: ${Math.round(heapUsedMB)}MB > ${HEAP_PRESSURE_THRESHOLD_MB}MB; returning 503`
-      );
-      return {
-        success: false,
-        status: 503,
-        error: "Service temporarily unavailable due to resource pressure. Retry shortly.",
-        response: new Response(
-          JSON.stringify({
-            error: {
-              message: "Service temporarily unavailable due to resource pressure. Retry shortly.",
-              type: "server_error",
-              code: "heap_pressure",
-            },
-          }),
-          { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "5" } }
-        ),
-      };
-    }
+    const heapGuard = checkHeapPressureGuard(heapUsedMB);
+    if (heapGuard) return heapGuard;
   } catch {
     /* memoryUsage() never throws */
   }
@@ -1581,7 +1563,12 @@ export async function handleChatCore({
   }
 
   body = sanitizeChatRequestBody(body, sourceFormat, targetFormat);
-  const memoryOwnerId = resolveMemoryOwnerId(apiKeyInfo as Record<string, unknown> | null);
+  // Per-request opt-out: clients that manage their own context send
+  // `x-omniroute-no-memory: true` to skip memory+skills injection (a null owner
+  // disables both branches in injectMemoryAndSkills). See PRD-2026-06-19-no-memory-header.
+  const memoryOwnerId = isNoMemoryRequested(clientRawRequest?.headers ?? null)
+    ? null
+    : resolveMemoryOwnerId(apiKeyInfo as Record<string, unknown> | null);
   const injectionResult = await injectMemoryAndSkills({
     body,
     memoryOwnerId,
@@ -3363,17 +3350,14 @@ export async function handleChatCore({
                   `429 on connection ${String(failedConnectionId).slice(0, 8)} (attempt ${attempts + 1}/${maxAttempts}), rotating account`
                 );
 
-                // Mark current connection as rate-limited in the DB
+                // Mark only the current Codex model scope as rate-limited.
                 if (failedConnectionId) {
-                  const rateLimitedUntil = new Date(
-                    Date.now() + (retryAfterMs || 60_000)
-                  ).toISOString();
-                  updateProviderConnection(String(failedConnectionId), {
-                    rateLimitedUntil,
-                    testStatus: "unavailable",
-                    lastError: "429 rate limited — codex account rotation",
-                    errorCode: 429,
-                  }).catch(() => {});
+                  await markCodexScopeRateLimited({
+                    failedConnectionId: String(failedConnectionId),
+                    model: modelToCall || model || requestedModel || null,
+                    rateLimitedUntil: new Date(Date.now() + (retryAfterMs || 60_000)).toISOString(),
+                    credentials,
+                  });
                   if (!codexExcludedIds.includes(String(failedConnectionId))) {
                     codexExcludedIds.push(String(failedConnectionId));
                   }
@@ -3389,9 +3373,15 @@ export async function handleChatCore({
                 }
 
                 // Fetch next available codex connection (excluding all previously failed ones)
-                const nextCreds = await getProviderCredentials("codex", null, null, null, {
-                  excludeConnectionIds: [...codexExcludedIds],
-                }).catch(() => null);
+                const nextCreds = await getProviderCredentials(
+                  "codex",
+                  null,
+                  null,
+                  modelToCall || model || requestedModel || null,
+                  {
+                    excludeConnectionIds: [...codexExcludedIds],
+                  }
+                ).catch(() => null);
 
                 if (!nextCreds || nextCreds.allRateLimited) {
                   log?.warn?.("CODEX_FAILOVER", "No more codex accounts available — returning 429");
@@ -3768,6 +3758,7 @@ export async function handleChatCore({
         ? 499
         : error.name === "TimeoutError" || error.name === "BodyTimeoutError"
           ? HTTP_STATUS.GATEWAY_TIMEOUT
+          : (error.status && typeof error.status === "number") ? error.status
           : HTTP_STATUS.BAD_GATEWAY;
     const failureMessage =
       error.name === "AbortError"
@@ -3775,7 +3766,9 @@ export async function handleChatCore({
         : formatProviderError(error, provider, model, failureStatus);
     const upstreamErrorCode = getUpstreamErrorIdentifier(error);
     const upstreamErrorType =
-      upstreamErrorCode === ANTIGRAVITY_PRE_RESPONSE_TIMEOUT_CODE ? "upstream_timeout" : undefined;
+      upstreamErrorCode === ANTIGRAVITY_PRE_RESPONSE_TIMEOUT_CODE ? "upstream_timeout"
+      : failureStatus === 401 ? "authentication_error"
+      : undefined;
     appendRequestLog({
       model,
       provider,

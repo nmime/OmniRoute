@@ -82,6 +82,8 @@ test("Codex helper functions isolate rate-limit scopes and parse quota headers",
   });
 
   assert.equal(getCodexModelScope("codex-spark-mini"), "spark");
+  assert.equal(getCodexModelScope("gpt-5.3-codex-spark"), "spark");
+  assert.equal(getCodexModelScope("codex-bengalfox"), "spark");
   assert.equal(getCodexModelScope("gpt-5.3-codex"), "codex");
   assert.equal(getCodexModelScope("gpt-5.5-xhigh"), "codex");
   assert.equal(getCodexUpstreamModel("gpt-5.5-xhigh"), "gpt-5.5");
@@ -113,6 +115,7 @@ test("Codex helper functions isolate rate-limit scopes and parse quota headers",
   assert.equal(isCodexResponsesWebSocketRequired("gpt-5.5-medium", {}), false);
   __setCodexWebSocketTransportForTesting(undefined);
   assert.equal(getCodexRateLimitKey("acct-1", "codex-spark-mini"), "acct-1:spark");
+  assert.equal(getCodexRateLimitKey("acct-1", "gpt-5.3-codex-spark"), "acct-1:spark");
   assert.equal(quota.usage5h, 100);
   assert.equal(quota.limit7d, 5000);
   assert.ok(getCodexResetTime(quota) >= new Date(quota.resetAt7d).getTime());
@@ -239,10 +242,10 @@ test("CodexExecutor.transformRequest injects default instructions, clamps reason
     requestEndpointPath: "/responses",
   });
 
-  assert.equal(result.stream, true);
-  assert.equal(result.store, false);
+  assert.deepEqual([result.stream, result.store], [true, false]);
   assert.equal(result.instructions.length > 0, true);
-  assert.equal(result.reasoning.effort, "high");
+  assert.deepEqual(result.reasoning, { effort: "high", summary: "auto" });
+  assert.deepEqual(result.include, ["reasoning.encrypted_content"]);
   assert.equal(result.service_tier, "priority");
   assert.equal(result.messages, undefined);
   assert.equal(result.prompt, undefined);
@@ -733,7 +736,7 @@ test("CodexExecutor.transformRequest keeps explicit request values ahead of conn
     }
   );
 
-  assert.equal(result.reasoning.effort, "none");
+  assert.deepEqual([result.reasoning, result.include], [{ effort: "none" }, undefined]);
   assert.equal(result.service_tier, "standard");
 });
 
@@ -803,7 +806,8 @@ test("CodexExecutor.transformRequest passes GPT 5.4 Mini xhigh reasoning through
     {
       model: "gpt-5.4-mini",
       input: [],
-      reasoning: { effort: "xhigh", summary: "auto" },
+      reasoning: { effort: "xhigh", summary: "detailed" },
+      include: ["code_interpreter_call.outputs"],
     },
     true,
     {
@@ -819,11 +823,8 @@ test("CodexExecutor.transformRequest passes GPT 5.4 Mini xhigh reasoning through
   const reasoning = getRecord(sanitized.reasoning);
 
   assert.equal(sanitized.model, "gpt-5.4-mini");
-  // #3756: xhigh now passes through by default. gpt-5.4-mini has no
-  // supportsXHighEffort:false flag (and ships a gpt-5.4-mini-xhigh catalog
-  // variant), so the effort is preserved instead of downgraded to "high".
-  assert.equal(reasoning.effort, "xhigh");
-  assert.equal(reasoning.summary, "auto");
+  assert.deepEqual(reasoning, { effort: "xhigh", summary: "detailed" });
+  assert.deepEqual(sanitized.include, ["code_interpreter_call.outputs", "reasoning.encrypted_content"]);
   assert.equal(sanitized.reasoning_effort, undefined);
 });
 

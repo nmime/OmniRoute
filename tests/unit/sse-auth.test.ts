@@ -855,12 +855,14 @@ test("getProviderCredentials skips codex scope-limited accounts unless suppressi
   });
 
   const blocked = await auth.getProviderCredentials("codex", null, null, "codex-spark-mini");
+  const normalCodex = await auth.getProviderCredentials("codex", null, null, "gpt-5.5");
   const bypassed = await auth.getProviderCredentials("codex", null, null, "codex-spark-mini", {
     allowSuppressedConnections: true,
   });
 
   assert.equal(blocked.allRateLimited, true);
   assert.equal(blocked.retryAfter, retryAfter);
+  assert.equal(normalCodex.connectionId, connection.id);
   assert.equal(bypassed.connectionId, connection.id);
 });
 
@@ -1390,6 +1392,34 @@ test("markAccountUnavailable honors configured api-key rate-limit cooldowns", as
   assert.equal(result.cooldownMs, 125);
 });
 
+test("Codex quota policy keeps normal and Spark windows separate", async () => {
+  const normalConnection = await seedConnection("codex", {
+    authType: "oauth",
+    name: "codex-normal-quota-policy",
+    apiKey: null,
+    accessToken: "codex-normal-quota-policy-access",
+    refreshToken: "codex-normal-quota-policy-refresh",
+    providerSpecificData: { limitPolicy: { enabled: true, thresholdPercent: 95 } },
+  });
+  quotaCache.setQuotaCache(normalConnection.id, "codex", {
+    session: { remainingPercentage: 80, resetAt: futureIso(60_000) },
+    weekly: { remainingPercentage: 70, resetAt: futureIso(120_000) },
+    gpt_5_3_codex_spark_session: { remainingPercentage: 0, resetAt: futureIso(300_000) },
+  });
+
+  const normalSelected = await auth.getProviderCredentials("codex", null, null, "gpt-5.3-codex");
+  const sparkSelected = await auth.getProviderCredentials(
+    "codex",
+    null,
+    null,
+    "gpt-5.3-codex-spark"
+  );
+
+  assert.equal(normalSelected.connectionId, normalConnection.id);
+  assert.equal(sparkSelected.allRateLimited, true);
+  assert.match(String(sparkSelected.lastError), /configured quota threshold/i);
+});
+
 test("markAccountUnavailable stores Codex scope-specific cooldowns without a global rate limit", async () => {
   const connection = await seedConnection("codex", {
     authType: "oauth",
@@ -1409,6 +1439,7 @@ test("markAccountUnavailable stores Codex scope-specific cooldowns without a glo
   );
   const updated = await providersDb.getProviderConnectionById(connection.id);
   const selected = await auth.getProviderCredentials("codex", null, null, "codex-spark-mini");
+  const normalSelected = await auth.getProviderCredentials("codex", null, null, "gpt-5.3-codex");
 
   assert.equal(result.shouldFallback, true);
   assert.ok(result.cooldownMs > 0);
@@ -1416,6 +1447,7 @@ test("markAccountUnavailable stores Codex scope-specific cooldowns without a glo
   assert.equal(updated.rateLimitedUntil, undefined);
   assert.ok(updated.providerSpecificData.codexScopeRateLimitedUntil.spark);
   assert.equal(selected.allRateLimited, true);
+  assert.equal(normalSelected.connectionId, connection.id);
 });
 
 test("markAccountUnavailable returns without fallback on bad requests", async () => {
