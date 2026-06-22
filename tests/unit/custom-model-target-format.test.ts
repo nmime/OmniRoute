@@ -22,6 +22,7 @@ process.env.DATA_DIR = TEST_DATA_DIR;
 const core = await import("../../src/lib/db/core.ts");
 const providersDb = await import("../../src/lib/db/providers.ts");
 const modelsDb = await import("../../src/lib/db/models.ts");
+const settingsDb = await import("../../src/lib/db/settings.ts");
 const { getModelInfo } = await import("../../src/sse/services/model.ts");
 
 test.before(async () => {
@@ -33,6 +34,14 @@ test.before(async () => {
     baseUrl: "https://proxy.example.com",
     chatPath: "/v1/chat/completions",
     modelsPath: "/v1/models",
+  });
+  await providersDb.createProviderNode({
+    id: "openai-compatible-responses-2905",
+    type: "openai-compatible",
+    name: "Gateway 2905 Responses",
+    prefix: "g29r",
+    apiType: "responses",
+    baseUrl: "https://responses.example.com",
   });
 });
 
@@ -80,4 +89,22 @@ test("#2905 a custom model without targetFormat surfaces none (provider default 
   );
   const info = (await getModelInfo("g29/plain-model")) as { targetFormat?: string };
   assert.equal(info.targetFormat, undefined, "no targetFormat → falls back to provider default");
+});
+
+test("#arima provider_nodes apiType=responses surfaces apiFormat for prefixed compatible models", async () => {
+  const info = (await getModelInfo("g29r/gpt-5.5")) as {
+    provider?: string;
+    model?: string;
+    apiFormat?: string;
+  };
+  assert.equal(info.provider, "openai-compatible-responses-2905");
+  assert.equal(info.model, "gpt-5.5");
+  assert.equal(info.apiFormat, "responses");
+});
+
+test("#arima provider_nodes apiType=responses surfaces apiFormat through settings aliases", async () => {
+  await settingsDb.updateSettings({ modelAliases: { "gpt-5.5": "g29r/gpt-5.5" } });
+  const info = (await getModelInfo("gpt-5.5")) as { provider?: string; apiFormat?: string };
+  assert.equal(info.provider, "openai-compatible-responses-2905");
+  assert.equal(info.apiFormat, "responses");
 });

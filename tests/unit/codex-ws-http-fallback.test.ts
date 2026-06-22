@@ -1,11 +1,9 @@
 /**
- * Tests for resolveResponsesApiModel — ensures bare ChatGPT model IDs are
- * codex-preferred when the Codex CLI falls back from WebSocket to HTTP and
- * hits /v1/responses with a bare model id (e.g. "gpt-5.5").
- *
- * Root cause: WS transport requires bare ids (codex/ prefix rejected client-side),
- * but HTTP routing resolves bare "gpt-5.5" → openrouter, not codex.
- * Fix: /v1/responses pre-resolves bare ids with codex preference.
+ * Tests for resolveResponsesApiModel — generic /v1/responses must preserve
+ * OmniRoute's configured routing order. The codex-only WebSocket bridge may
+ * prefer Codex for bare ids, but the public HTTP Responses path must not retry
+ * bare ChatGPT-style ids as codex/* unless normal configured routing already
+ * selected Codex.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,17 +15,24 @@ function makeResolver(map: Record<string, { provider: string; model: string }>):
   return async (id: string) => map[id] ?? {};
 }
 
-test("bare gpt-5.5 that resolves to codex is rewritten to codex/gpt-5.5", async () => {
-  const resolve = makeResolver({
-    "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
-    "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
-  });
+test("bare gpt-5.5 follows normal resolver and is not retried as codex/gpt-5.5", async () => {
+  const calls: string[] = [];
+  const resolve: ModelResolver = async (id: string) => {
+    calls.push(id);
+    return (
+      {
+        "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
+        "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
+      }[id] ?? {}
+    );
+  };
   const result = await resolveResponsesApiModel("gpt-5.5", resolve);
-  assert.equal(result.model, "codex/gpt-5.5");
-  assert.equal(result.changed, true);
+  assert.equal(result.model, "gpt-5.5");
+  assert.equal(result.changed, false);
+  assert.deepEqual(calls, ["gpt-5.5"], "HTTP Responses must not probe codex/* as fallback");
 });
 
-test("bare gpt-5.5 with explicit chat-capable openai-compatible dashboard alias stays Arima-primary", async () => {
+test("bare gpt-5.5 with explicit chat-only openai-compatible dashboard alias is preserved", async () => {
   const calls: string[] = [];
   const resolve: ModelResolver = async (id: string) => {
     calls.push(id);
@@ -49,7 +54,7 @@ test("bare gpt-5.5 with explicit chat-capable openai-compatible dashboard alias 
   const result = await resolveResponsesApiModel("gpt-5.5", resolve, async () => false, explicit);
   assert.equal(result.model, "gpt-5.5");
   assert.equal(result.changed, false);
-  assert.deepEqual(calls, [], "explicit Arima alias should short-circuit codex rewrite");
+  assert.deepEqual(calls, [], "explicit dashboard alias wins before fallback probing");
 });
 
 test("bare gpt-5.5 with explicit responses-capable openai-compatible alias is not rewritten", async () => {
@@ -78,19 +83,26 @@ test("bare gpt-5.5 with explicit responses-capable openai-compatible alias is no
   assert.deepEqual(calls, [], "responses-capable explicit alias should short-circuit codex retry");
 });
 
-test("bare gpt-5.5 with no explicit dashboard alias still falls back to Codex", async () => {
-  const resolve = makeResolver({
-    "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
-    "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
-  });
+test("bare gpt-5.5 with no explicit dashboard alias does not silently fall back to Codex", async () => {
+  const calls: string[] = [];
+  const resolve: ModelResolver = async (id: string) => {
+    calls.push(id);
+    return (
+      {
+        "gpt-5.5": { provider: "openrouter", model: "gpt-5.5" },
+        "codex/gpt-5.5": { provider: "codex", model: "gpt-5.5" },
+      }[id] ?? {}
+    );
+  };
   const result = await resolveResponsesApiModel(
     "gpt-5.5",
     resolve,
     async () => false,
     async () => null
   );
-  assert.equal(result.model, "codex/gpt-5.5");
-  assert.equal(result.changed, true);
+  assert.equal(result.model, "gpt-5.5");
+  assert.equal(result.changed, false);
+  assert.deepEqual(calls, ["gpt-5.5"]);
 });
 
 test("bare gpt-5.5 with explicit Codex dashboard alias is rewritten to codex/gpt-5.5", async () => {
