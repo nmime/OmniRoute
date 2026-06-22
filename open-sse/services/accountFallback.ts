@@ -251,6 +251,15 @@ const MALFORMED_REQUEST_PATTERNS = [
   /tool_call.*name.*(?:blank|empty|missing)/i,
 ];
 
+// Parameter validation errors — model-specific constraints (different models = different limits)
+const PARAM_VALIDATION_PATTERNS = [
+  /max_tokens.*illegal/i,
+  /max_tokens.*must be/i,
+  /max_tokens.*range/i,
+  /parameter is illegal/i,
+  /is illegal.*range/i,
+];
+
 /**
  * T06: Returns true if response body indicates the account is permanently deactivated.
  */
@@ -477,6 +486,27 @@ export function lockModel(
     lastFailureAt: metadata.lastFailureAt ?? now,
     resetAfterMs: metadata.resetAfterMs ?? existing?.resetAfterMs ?? 0,
   });
+}
+
+/**
+ * Pick the `exactCooldownMs` to apply to a model lockout (#1308).
+ *
+ * When the upstream response carried an explicit reset longer than the base
+ * cooldown — e.g. Antigravity "Resets in 160h", a `Retry-After` header, or a
+ * parseable reset text already extracted by `checkFallbackError`/`parseRetryFromErrorText`
+ * into `parsedCooldownMs` — honor it exactly so an exhausted model is not retried
+ * again within minutes. Otherwise preserve the previous behavior: return `0` to let
+ * `recordModelLockoutFailure` apply its exponential backoff, or the base cooldown when
+ * backoff is disabled.
+ */
+export function selectLockoutCooldownMs(
+  parsedCooldownMs: number,
+  settings: { baseCooldownMs: number; useExponentialBackoff: boolean }
+): number {
+  if (typeof parsedCooldownMs === "number" && parsedCooldownMs > settings.baseCooldownMs) {
+    return parsedCooldownMs;
+  }
+  return settings.useExponentialBackoff ? 0 : settings.baseCooldownMs;
 }
 
 export function recordModelLockoutFailure(
@@ -1554,9 +1584,10 @@ export function checkFallbackError(
 
     const isOverflow = CONTEXT_OVERFLOW_PATTERNS.some((p) => p.test(errorStr));
     const isMalformed = MALFORMED_REQUEST_PATTERNS.some((p) => p.test(errorStr));
+    const isParamValidation = PARAM_VALIDATION_PATTERNS.some((p) => p.test(errorStr));
     const isModelAccessDenied = isModelAccessDeniedStructured || matchesModelAccessPattern;
 
-    if (isOverflow || isMalformed || isModelAccessDenied) {
+    if (isOverflow || isMalformed || isParamValidation || isModelAccessDenied) {
       return {
         shouldFallback: true,
         cooldownMs: 0,

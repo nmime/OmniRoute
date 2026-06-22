@@ -38,6 +38,7 @@ import {
   isQuotaPreflightEnabled,
 } from "@omniroute/open-sse/services/quotaPreflight.ts";
 import { resolveResilienceSettings } from "@/lib/resilience/settings";
+import { resolveModelLockoutSettings } from "@/lib/resilience/modelLockoutSettings";
 import { syncHealthFromDB, type KeyHealth } from "@omniroute/open-sse/services/apiKeyRotator.ts";
 import {
   classifyProviderError,
@@ -2000,6 +2001,11 @@ export async function markAccountUnavailable(
 
     const effectiveProviderProfile =
       providerProfile || (provider ? await getRuntimeProviderProfile(provider) : null);
+    // #4530 follow-up: the combo.ts lockout sites forward the admin-configured
+    // maxCooldownMs cap to recordModelLockoutFailure, but the markAccountUnavailable
+    // lockout sites (per-model quota, grok-web 403, local 404) never did, so the cap
+    // fell back to BACKOFF_CONFIG.max here. Resolve it once and pass it at every site.
+    const mlSettings = resolveModelLockoutSettings(await getCachedSettings());
     const fallbackResult = checkFallbackError(
       status,
       errorText,
@@ -2054,6 +2060,7 @@ export async function markAccountUnavailable(
         {
           exactCooldownMs:
             fallbackResult.usedUpstreamRetryHint === true ? fallbackResult.cooldownMs : null,
+          maxCooldownMs: mlSettings.maxCooldownMs,
         }
       );
       // Update last error for observability (without changing terminal status)
@@ -2082,7 +2089,8 @@ export async function markAccountUnavailable(
         "forbidden",
         status,
         effectiveProviderProfile?.baseCooldownMs ?? COOLDOWN_MS.serviceUnavailable,
-        effectiveProviderProfile
+        effectiveProviderProfile,
+        { maxCooldownMs: mlSettings.maxCooldownMs }
       );
       updateProviderConnection(connectionId, {
         lastErrorType: "forbidden",
@@ -2129,6 +2137,7 @@ export async function markAccountUnavailable(
         {
           exactCooldownMs:
             fallbackResult.usedUpstreamRetryHint === true ? fallbackResult.cooldownMs : null,
+          maxCooldownMs: mlSettings.maxCooldownMs,
         }
       );
       updateProviderConnection(connectionId, {
@@ -2162,7 +2171,8 @@ export async function markAccountUnavailable(
         status === 404
           ? (effectiveProviderProfile?.baseCooldownMs ?? COOLDOWN_MS.notFoundLocal)
           : COOLDOWN_MS.notFoundLocal,
-        effectiveProviderProfile
+        effectiveProviderProfile,
+        { maxCooldownMs: mlSettings.maxCooldownMs }
       );
       updateProviderConnection(connectionId, {
         lastErrorType: "not_found",

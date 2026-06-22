@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { resolveChatRequestBody } from "./requestBody";
 import {
   getProviderCredentialsWithQuotaPreflight,
   markAccountUnavailable,
@@ -65,6 +66,7 @@ import {
   safeLogEvents,
   shouldRetryStreamEarlyEof,
   withSessionHeader,
+  withSelectedConnectionHeader,
 } from "./chatHelpers";
 import { connectionHasExtraKeys } from "@omniroute/open-sse/services/apiKeyRotator.ts";
 
@@ -84,6 +86,10 @@ import {
   applyTaskAwareRouting,
   getTaskRoutingConfig,
 } from "@omniroute/open-sse/services/taskAwareRouter.ts";
+import {
+  hasNativeWebSearchTool,
+  resolveWebSearchRouteOverride,
+} from "@omniroute/open-sse/services/webSearchRouting.ts";
 import {
   generateSessionId as generateStableSessionId,
   touchSession,
@@ -302,7 +308,11 @@ function createLocalCapacityResponse(
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
-export async function handleChat(request: any, clientRawRequest: any = null) {
+export async function handleChat(
+  request: any,
+  clientRawRequest: any = null,
+  preParsedBody: any = null
+) {
   // Pipeline: Start request telemetry
   const reqId = generateRequestId();
   const telemetry = new RequestTelemetry(reqId);
@@ -310,7 +320,7 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
   let body;
   try {
     telemetry.startPhase("parse");
-    body = await request.json();
+    body = await resolveChatRequestBody(request, preParsedBody);
     telemetry.endPhase();
   } catch {
     log.warn("CHAT", "Invalid JSON body");
@@ -506,6 +516,24 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
     }
     taskRouteInfo = { taskType: tr.taskType, wasRouted: tr.wasRouted };
     telemetry.endPhase();
+  }
+
+  // #4481 layer 2 — Web-Search Routing (CCR-style Router.webSearch): a native web_search
+  // server tool + a configured `webSearchRouteModel` routes the whole request to that
+  // model (some providers don't implement Anthropic's web_search_20250305 server tool).
+  // Settings are read only when a web-search tool is present; the override lands before
+  // auto/combo resolution and the layer-1 fallback so the target's own handling applies.
+  if (hasNativeWebSearchTool(body)) {
+    const wsSettings = await getCachedSettings().catch(() => ({}) as Record<string, unknown>);
+    const wsRoute = resolveWebSearchRouteOverride(resolvedModelStr, body, wsSettings);
+    if (wsRoute.wasRouted) {
+      log.info(
+        "WEBSEARCH-ROUTE",
+        `web_search tool → model override: ${resolvedModelStr} → ${wsRoute.model}`
+      );
+      resolvedModelStr = wsRoute.model;
+      body = { ...body, model: wsRoute.model };
+    }
   }
 
   // ── Zero-Config Auto-Routing (auto and auto/ prefix) ────────────────────────
@@ -721,6 +749,7 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
           allowedConnectionIds?: string[] | null;
           failoverBeforeRetry?: boolean;
           providerId?: string | null;
+          effectiveComboStrategy?: string | null;
         }
       ) =>
         handleSingleModelChat(
@@ -747,7 +776,7 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
             cachedSettings: settings,
             providerId: target?.providerId ?? null,
           },
-          combo.strategy,
+          target?.effectiveComboStrategy ?? combo.strategy,
           true
         ),
       isModelAvailable: checkModelAvailable,
@@ -910,6 +939,7 @@ async function handleSingleModelChat(
           failoverBeforeRetry?: boolean;
           allowRateLimitedConnection?: boolean;
           providerId?: string | null;
+          effectiveComboStrategy?: string | null;
         }
       ) =>
         handleSingleModelChat(
@@ -931,7 +961,7 @@ async function handleSingleModelChat(
             allowRateLimitedConnection: target?.allowRateLimitedConnection === true,
             providerId: target?.providerId ?? null,
           },
-          redirectCombo.strategy ?? "priority",
+          target?.effectiveComboStrategy ?? redirectCombo.strategy ?? "priority",
           false
         ),
       isModelAvailable: async () => true,
@@ -1338,7 +1368,7 @@ async function handleSingleModelChat(
 
         // Stream readiness timeout is an upstream stall after an HTTP response was received,
         // not an account/quota failure. Do NOT mark the account unavailable here.
-        return result.response;
+        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
       }
 
       if (isAntigravityStreamReadinessFailure) {
@@ -1382,7 +1412,7 @@ async function handleSingleModelChat(
           continue;
         }
 
-        return result.response;
+        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
       }
 
       const isAntigravityPreResponseTimeout =
@@ -1432,13 +1462,13 @@ async function handleSingleModelChat(
           continue;
         }
 
-        return result.response;
+        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
       }
 
       if (result.errorType === "account_semaphore_capacity") {
         // Local concurrency pressure is not an upstream quota failure. Prefer another
         // account when possible; pinned combo steps fall through to combo orchestration.
-        if (
+if (
           result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL" ||
           result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
         ) {
@@ -1457,8 +1487,8 @@ async function handleSingleModelChat(
             retryAfterSec: 1,
           });
         }
-        if (hasForcedConnection && provider !== "codex") {
-          return result.response;
+        if (hasForcedConnection) {
+          return withSelectedConnectionHeader(result.response, credentials?.connectionId);
         }
 
         log.warn(
@@ -1703,7 +1733,7 @@ async function handleSingleModelChat(
         breaker._onFailure();
       }
 
-      return result.response;
+      return withSelectedConnectionHeader(result.response, credentials?.connectionId);
     }
   }
 }

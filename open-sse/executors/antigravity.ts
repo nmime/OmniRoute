@@ -763,6 +763,21 @@ export class AntigravityExecutor extends BaseExecutor {
       requestType: _requestType,
       requestId: _requestId,
       request: _request,
+      // #1944: output_config (and the legacy output_format) are Anthropic/Claude-Code-only
+      // fields. Google's Cloud Code envelope rejects unknown top-level fields with a 400
+      // ("Invalid JSON payload received. Unknown name \"output_config\""), which broke every
+      // Claude model served via Antigravity. Drop them so they never reach the envelope.
+      output_config: _outputConfig,
+      output_format: _outputFormat,
+      // #1926: the unified thinking adapter can also set Claude/OpenAI-native thinking fields
+      // at the body root. Google rejects them with `400 Bad input: oneOf at '/' not met`
+      // (or `Unknown name "thinking"`), breaking every reasoning/thinking model served via
+      // Antigravity (e.g. claude-opus-4-x-thinking). Strip the whole thinking family too.
+      thinking: _thinking,
+      reasoning_effort: _reasoningEffort,
+      reasoning: _reasoning,
+      enable_thinking: _enableThinking,
+      thinking_budget: _thinkingBudget,
       ...passthroughFields
     } = normalizedBody;
 
@@ -882,11 +897,12 @@ export class AntigravityExecutor extends BaseExecutor {
   }
 
   // Parse retry time from Antigravity error message body
-  // Format: "Your quota will reset after 2h7m23s" or "1h30m" or "45m" or "30s"
+  // Format: "Your quota will reset after 2h7m23s" or "Resets in 160h27m24s" or
+  // "1h30m" or "45m" or "30s". The optional plural ("resets in") must match too (#1308).
   parseRetryFromErrorMessage(errorMessage: unknown): number | null {
     if (!errorMessage || typeof errorMessage !== "string") return null;
 
-    const match = errorMessage.match(/reset (?:after|in) (\d+h)?(\d+m)?(\d+s)?/i);
+    const match = errorMessage.match(/resets? (?:after|in) (\d+h)?(\d+m)?(\d+s)?/i);
     if (!match) return null;
 
     let totalMs = 0;
