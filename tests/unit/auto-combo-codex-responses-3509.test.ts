@@ -32,8 +32,8 @@ test("#3509 'auto/<strategy>' passes through unchanged (already handled by the s
   assert.equal(out.model, "auto/cost-optimized");
 });
 
-test("#3509 a real ChatGPT model id is still codex-preferred (regression)", async () => {
+test("#3509 a real ChatGPT model id is not silently retried as codex on generic /v1/responses", async () => {
   const out = await resolveResponsesApiModel("gpt-5.5", resolver, async () => false);
-  assert.equal(out.changed, true);
-  assert.equal(out.model, "codex/gpt-5.5");
+  assert.equal(out.changed, false);
+  assert.equal(out.model, "gpt-5.5");
 });

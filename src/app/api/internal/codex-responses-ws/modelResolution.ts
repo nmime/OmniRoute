@@ -27,36 +27,6 @@ export type ExplicitModelResolver = (
   modelStr: string
 ) => Promise<ResolvedModelInfo | null | undefined> | ResolvedModelInfo | null | undefined;
 
-function isOpenAICompatibleProvider(provider: unknown): provider is string {
-  return typeof provider === "string" && provider.startsWith("openai-compatible-");
-}
-
-function isResponsesCapableOpenAICompatible(info: ResolvedModelInfo): boolean {
-  if (info.apiFormat === "responses" || info.targetFormat === "openai-responses") {
-    return true;
-  }
-
-  return typeof info.provider === "string" && info.provider.includes("responses");
-}
-
-function shouldHonorExplicitResponsesAlias(info: ResolvedModelInfo): boolean {
-  if (!info.provider) return false;
-  if (info.provider === "codex") return true;
-
-  // OpenAI-compatible custom providers are endpoint-shape specific. A dashboard
-  // alias pointing at a chat-only compatible provider must not steal
-  // /v1/responses traffic from the Codex fallback path; only response-capable
-  // compatible providers (provider apiType=responses or model apiFormat=responses)
-  // can safely receive Responses API requests here.
-  if (isOpenAICompatibleProvider(info.provider)) {
-    return isResponsesCapableOpenAICompatible(info);
-  }
-
-  // Built-in/non-compatible providers already have explicit translator paths in
-  // the main chat pipeline, so preserve their dashboard alias behavior.
-  return true;
-}
-
 /**
  * Resolve a Responses-WebSocket model id, preferring the codex provider.
  *
@@ -82,25 +52,16 @@ export async function resolveCodexWsModelInfo(
 }
 
 /**
- * Resolve a model ID for the HTTP Responses path, applying codex preference
- * for bare ChatGPT-style model IDs (those without a provider prefix).
+ * Resolve a model ID for the generic HTTP Responses path without changing the
+ * product routing order. Bare models are intentionally not retried as codex/*
+ * here: dashboard aliases, combo mappings, custom provider metadata, provider
+ * capabilities, and normal inference must decide the provider. The codex-only
+ * WebSocket bridge keeps its own codex preference above because that endpoint
+ * cannot talk to any other upstream.
  *
- * When the Codex CLI falls back from WebSocket to HTTP (#15492), it sends bare
- * model IDs like "gpt-5.5" to /v1/responses. Without this resolution, OmniRoute
- * routes them to openrouter/openai instead of the configured codex OAuth
- * connections, producing "No credentials for provider: openrouter".
- *
- * @param requestedModel the model id from the Responses API request body
- * @param resolve a getModelInfo-style resolver
- * @param isCombo optional predicate — when the bare id is a combo name, skip the codex
- *        rewrite so downstream combo routing resolves it (#3227/#3233).
- * @param resolveExplicit optional dashboard-alias/provider-mapping resolver — when the
- *        bare id explicitly maps to a Responses-capable provider, skip the codex rewrite
- *        so dashboard distribution wins over the Codex CLI HTTP fallback preference.
- * @returns { model, changed, error? } — model is the (possibly rewritten) id;
- *          changed=true means a codex/ prefix was applied. error is set when a
- *          dashboard alias targets a provider that cannot handle Responses API
- *          traffic and no compatible Codex fallback exists.
+ * @returns { model, changed } — changed=true only when normal configured routing
+ *          already resolved the bare model to Codex and adding the codex/ prefix
+ *          preserves that configured choice for downstream handlers.
  */
 export async function resolveResponsesApiModel(
   requestedModel: string,
@@ -112,68 +73,48 @@ export async function resolveResponsesApiModel(
     return { model: requestedModel, changed: false };
   }
 
-  // #3509: "auto" is OmniRoute's zero-config auto-routing keyword (handled by the
-  // isAutoRouting path in chat.ts, not a DB combo). It must NEVER be rewritten to
-  // "codex/auto" — ChatGPT rejects it with "The 'auto' model is not supported when using
-  // Codex with a ChatGPT account". ("auto/<strategy>" already returns via the slash guard above.)
+  // #3509: "auto" is OmniRoute's zero-config auto-routing keyword. It must
+  // never be rewritten to a provider-prefixed model.
   if (requestedModel === "auto") {
     return { model: requestedModel, changed: false };
   }
 
-  // #3227/#3233: a bare combo name (e.g. "n8n-text", "paid-premium") must NOT be
-  // force-prefixed to codex/ — Codex accepts arbitrary model strings, so the rewrite
-  // would shadow the combo and route to codex. Let downstream combo routing handle it.
+  // Bare combo names must pass through so combo/model-combo routing wins before
+  // any single-provider model inference.
   if (isCombo) {
     try {
       if (await isCombo(requestedModel)) return { model: requestedModel, changed: false };
     } catch {
-      // combo lookup unavailable — fall through to normal codex-preference resolution
+      // Combo lookup unavailable — continue to configured single-model routing.
     }
   }
 
-  // Dashboard-configured model aliases/provider mappings are explicit routing choices.
-  // Honor those before applying the Codex CLI HTTP fallback preference for bare
-  // ChatGPT-style IDs. Otherwise an alias like
-  // "gpt-5.5" -> "openai-compatible-chat-.../gpt-5.5" would be shadowed by
-  // the permissive codex/<model> retry below and incorrectly routed to Codex.
-  let unsupportedExplicitResponsesAlias: ResolvedModelInfo | null = null;
+  // Dashboard-configured aliases/provider mappings are explicit routing choices.
+  // Preserve non-Codex targets (including chat-only compatible providers that the
+  // unified Responses->Chat translator can handle) and only prefix when the alias
+  // itself chose Codex.
   if (resolveExplicit) {
     try {
       const explicit = await resolveExplicit(requestedModel);
       if (explicit?.provider) {
-        if (!shouldHonorExplicitResponsesAlias(explicit)) {
-          unsupportedExplicitResponsesAlias = explicit;
-        } else {
-          if (explicit.provider !== "codex") {
-            return { model: requestedModel, changed: false };
-          }
-
-          const prefixed = `codex/${explicit.model || requestedModel}`;
-          return { model: prefixed, changed: true };
+        if (explicit.provider === "codex") {
+          return { model: `codex/${explicit.model || requestedModel}`, changed: true };
         }
+        return { model: requestedModel, changed: false };
       }
     } catch {
-      // Explicit mapping lookup unavailable — fall through to existing codex preference.
+      // Explicit mapping lookup unavailable — fall through to normal resolver.
     }
   }
 
   try {
-    const resolved = await resolveCodexWsModelInfo(requestedModel, resolve);
-    if (resolved?.provider !== "codex") {
-      if (unsupportedExplicitResponsesAlias) {
-        const error = `Model alias '${requestedModel}' targets a chat-only OpenAI-compatible provider that cannot serve /v1/responses. Use /v1/chat/completions, configure the provider/model for Responses API, or request a provider-prefixed Responses-capable model.`;
-        return {
-          model: requestedModel,
-          changed: false,
-          error,
-        };
-      }
-      return { model: requestedModel, changed: false };
+    const resolved = await resolve(requestedModel);
+    if (resolved?.provider === "codex") {
+      return { model: `codex/${resolved.model || requestedModel}`, changed: true };
     }
-
-    const prefixed = `codex/${resolved.model || requestedModel}`;
-    return { model: prefixed, changed: true };
   } catch {
-    return { model: requestedModel, changed: false };
+    // Resolver unavailable — pass through unchanged.
   }
+
+  return { model: requestedModel, changed: false };
 }
