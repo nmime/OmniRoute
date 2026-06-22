@@ -50,15 +50,25 @@ test("combo name 'n8n-text' is NOT rewritten to codex/ prefix", async () => {
   assert.equal(result.changed, false, "combo name must not be marked as changed");
 });
 
-test("bare gpt-5.5 without combo is still rewritten to codex/gpt-5.5", async () => {
+test("bare gpt-5.5 keeps configured non-Codex routing on generic /v1/responses", async () => {
   mockModelInfo.clear();
   mockModelInfo.set("gpt-5.5", { provider: "openrouter", model: "gpt-5.5" });
   mockModelInfo.set("codex/gpt-5.5", { provider: "codex", model: "gpt-5.5" });
   mockCombos.clear();
 
   const result = await resolveResponsesApiModel("gpt-5.5", mockGetModelInfo, mockIsCombo);
-  assert.equal(result.model, "codex/gpt-5.5", "bare codex model must be rewritten");
-  assert.equal(result.changed, true, "bare codex model must be marked as changed");
+  assert.equal(result.model, "gpt-5.5", "configured non-Codex routing must pass through");
+  assert.equal(result.changed, false, "configured non-Codex routing must not be marked as changed");
+});
+
+test("bare gpt-5.5 is prefixed only when configured routing resolves to Codex", async () => {
+  mockModelInfo.clear();
+  mockModelInfo.set("gpt-5.5", { provider: "codex", model: "gpt-5.5" });
+  mockCombos.clear();
+
+  const result = await resolveResponsesApiModel("gpt-5.5", mockGetModelInfo, mockIsCombo);
+  assert.equal(result.model, "codex/gpt-5.5", "configured Codex routing must be prefixed");
+  assert.equal(result.changed, true, "configured Codex routing must be marked as changed");
 });
 
 test("already-prefixed codex/gpt-5.5 passes through unchanged", async () => {

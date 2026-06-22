@@ -1468,7 +1468,7 @@ async function handleSingleModelChat(
       if (result.errorType === "account_semaphore_capacity") {
         // Local concurrency pressure is not an upstream quota failure. Prefer another
         // account when possible; pinned combo steps fall through to combo orchestration.
-if (
+        if (
           result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL" ||
           result.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
         ) {
@@ -1487,7 +1487,7 @@ if (
             retryAfterSec: 1,
           });
         }
-        if (hasForcedConnection) {
+        if (hasForcedConnection && provider !== "codex") {
           return withSelectedConnectionHeader(result.response, credentials?.connectionId);
         }
 

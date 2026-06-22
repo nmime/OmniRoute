@@ -226,14 +226,14 @@ export function openaiResponsesToOpenAIRequest(
   let currentAssistantMsg: JsonRecord | null = null;
   let pendingToolResults: JsonRecord[] = [];
 
-// Upstream providers reject messages:[] with "400: at least one message is required".
+  // Upstream providers reject messages:[] with "400: at least one message is required".
   // When the client sends input:[] (empty), inject a placeholder user message — mirrors
-  // upstream 9router#419 while preserving normalized Responses input shapes.
-  const rawInputItems = toArray(normalizedRoot.input);
+  // upstream 9router#419 while preserving Responses input normalization above.
+  const normalizedInputItems = toArray(normalizedRoot.input);
   const inputItems: unknown[] =
-    rawInputItems.length === 0
+    normalizedInputItems.length === 0
       ? [{ type: "message", role: "user", content: [{ type: "input_text", text: "..." }] }]
-      : rawInputItems;
+      : normalizedInputItems;
   for (const itemValue of inputItems) {
     const item = toRecord(itemValue);
 
