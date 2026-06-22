@@ -16,6 +16,102 @@ import { requireClientApiAuth } from "@/server/authz/requireClientApiAuth";
 // The translators are always initialized via the open-sse side (chatCore),
 // so /v1/responses just delegates to handleChat which handles everything.
 
+const CODEX_FALLBACK_RESPONSE_MODELS = new Set([
+  "gpt-5.5",
+  "gpt5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex",
+]);
+
+type ChatDispatcher = (request: Request) => Promise<Response>;
+
+function isOpenAICompatibleProvider(provider: unknown): provider is string {
+  return typeof provider === "string" && provider.startsWith("openai-compatible-");
+}
+
+function responseTextLooksLikeCapabilityMismatch(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (
+    /\b(api[-_ ]?key|authorization|unauthori[sz]ed|forbidden|permission|credential|oauth|token)\b/.test(
+      lower
+    )
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(unsupported|not supported|not_support|capabilit|incompatible|format|schema|parameter|messages?|roles?|tools?|responses api|chat completions?)\b/.test(
+      lower
+    ) &&
+    /\b(model|provider|upstream|responses?|chat|format|schema|parameter|tool|message|role)\b/.test(
+      lower
+    )
+  );
+}
+
+export async function isRetryableResponsesPrimaryFailure(response: Response): Promise<boolean> {
+  const status = Number(response.status || 0);
+  if (status === 429 || status === 408 || status === 409 || status === 425) return true;
+  if (status >= 500 && status <= 599) return true;
+  if (status !== 400) return false;
+
+  try {
+    const text = await response.clone().text();
+    return responseTextLooksLikeCapabilityMismatch(text.slice(0, 8192));
+  } catch {
+    return false;
+  }
+}
+
+export async function resolveCodexFallbackModelForResponses(
+  requestedModel: unknown,
+  resolveExplicit = resolveConfiguredModelAlias
+): Promise<string | null> {
+  if (typeof requestedModel !== "string" || !requestedModel || requestedModel.includes("/")) {
+    return null;
+  }
+  if (!CODEX_FALLBACK_RESPONSE_MODELS.has(requestedModel)) return null;
+
+  try {
+    const explicit = await resolveExplicit(requestedModel);
+    if (!explicit?.provider || explicit.provider === "codex") return null;
+    if (!isOpenAICompatibleProvider(explicit.provider)) return null;
+    return `codex/${String(explicit.model || requestedModel)}`;
+  } catch {
+    return null;
+  }
+}
+
+function requestWithJsonModel(
+  request: Request,
+  body: Record<string, unknown>,
+  model: string
+): Request {
+  return new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: JSON.stringify({ ...body, model }),
+    signal: request.signal,
+  });
+}
+
+export async function handleResponsesWithCodexFallback(
+  primaryRequest: Request,
+  originalBody: Record<string, unknown> | null,
+  dispatch: ChatDispatcher = handleChat,
+  resolveFallbackModel = resolveCodexFallbackModelForResponses
+): Promise<Response> {
+  const primaryResponse = await dispatch(primaryRequest);
+  if (primaryResponse.ok || !originalBody) return primaryResponse;
+
+  const fallbackModel = await resolveFallbackModel(originalBody.model);
+  if (!fallbackModel) return primaryResponse;
+  if (!(await isRetryableResponsesPrimaryFailure(primaryResponse))) return primaryResponse;
+
+  return await dispatch(requestWithJsonModel(primaryRequest, originalBody, fallbackModel));
+}
+
 export async function OPTIONS() {
   return new Response(null, {
     headers: {
@@ -58,12 +154,7 @@ export async function withCodexPreferredModel(request: Request): Promise<Request
     }
     if (!changed) return request;
 
-    return new Request(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: JSON.stringify({ ...body, model }),
-      signal: request.signal,
-    });
+    return requestWithJsonModel(request, body as Record<string, unknown>, model);
   } catch {
     return request;
   }
@@ -78,6 +169,14 @@ async function postHandler(request, context) {
   // client drops the connection if no bytes arrive within ~5s. Keep the connection
   // warm with early keepalives while the upstream produces its first token (#2544).
   // Non-streaming callers (JSON) keep the original verbatim path untouched.
+  const originalBody = await request
+    .clone()
+    .json()
+    .catch(() => null);
+  const originalJsonBody =
+    originalBody && typeof originalBody === "object" && !Array.isArray(originalBody)
+      ? (originalBody as Record<string, unknown>)
+      : null;
   const resolved = await withCodexPreferredModel(request);
   if (resolved instanceof Response) return resolved;
   const accept = String(request.headers?.get?.("accept") || "").toLowerCase();
@@ -93,12 +192,15 @@ async function postHandler(request, context) {
       model = body?.model;
     } catch {}
     const thresholdMs = resolveKeepaliveThreshold(model);
-    return await withEarlyStreamKeepalive(handleChat(resolved), {
-      signal: request.signal,
-      thresholdMs,
-    });
+    return await withEarlyStreamKeepalive(
+      handleResponsesWithCodexFallback(resolved, originalJsonBody),
+      {
+        signal: request.signal,
+        thresholdMs,
+      }
+    );
   }
-  return await handleChat(resolved);
+  return await handleResponsesWithCodexFallback(resolved, originalJsonBody);
 }
 
 const guardedPostHandler = withInjectionGuard(postHandler);

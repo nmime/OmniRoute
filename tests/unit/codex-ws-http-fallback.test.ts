@@ -27,7 +27,7 @@ test("bare gpt-5.5 that resolves to codex is rewritten to codex/gpt-5.5", async 
   assert.equal(result.changed, true);
 });
 
-test("bare gpt-5.5 with explicit chat-only openai-compatible dashboard alias falls back to Codex", async () => {
+test("bare gpt-5.5 with explicit chat-capable openai-compatible dashboard alias stays Arima-primary", async () => {
   const calls: string[] = [];
   const resolve: ModelResolver = async (id: string) => {
     calls.push(id);
@@ -47,9 +47,9 @@ test("bare gpt-5.5 with explicit chat-only openai-compatible dashboard alias fal
       : null;
 
   const result = await resolveResponsesApiModel("gpt-5.5", resolve, async () => false, explicit);
-  assert.equal(result.model, "codex/gpt-5.5");
-  assert.equal(result.changed, true);
-  assert.deepEqual(calls, ["gpt-5.5", "codex/gpt-5.5"]);
+  assert.equal(result.model, "gpt-5.5");
+  assert.equal(result.changed, false);
+  assert.deepEqual(calls, [], "explicit Arima alias should short-circuit codex rewrite");
 });
 
 test("bare gpt-5.5 with explicit responses-capable openai-compatible alias is not rewritten", async () => {
