@@ -140,9 +140,7 @@ function resolveMinTime(override: number | undefined | null): number {
 
 // Resolve a maxConcurrent override. 0 or missing means "effectively infinite".
 function resolveMaxConcurrent(override: number | undefined | null): number {
-  return typeof override === "number" && override > 0
-    ? override
-    : EFFECTIVELY_INFINITE_CONCURRENCY;
+  return typeof override === "number" && override > 0 ? override : EFFECTIVELY_INFINITE_CONCURRENCY;
 }
 
 function buildLimiterDefaults() {
@@ -234,7 +232,9 @@ function watchdogTick() {
         limiters.delete(key);
         lastDispatchAt.delete(key);
         limiterLastUsed.delete(key);
-        logRateLimit(`🧹 [RATE-LIMIT] Evicting idle limiter: ${key} (inactive for ${Math.round((now - lastUsed) / 1000)}s)`);
+        logRateLimit(
+          `🧹 [RATE-LIMIT] Evicting idle limiter: ${key} (inactive for ${Math.round((now - lastUsed) / 1000)}s)`
+        );
         trackAsyncOperation(limiter.disconnect());
       }
     }
@@ -535,10 +535,18 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
 
   // Proactive sliding-window fallback for header-less providers with a declared cap
   // (Fase 8.2). No-op unless PROVIDER_DEFAULT_RATE_LIMITS has an entry for `provider`.
-  await awaitProviderDefaultSlot(provider, connectionId, signal, currentRequestQueueSettings.maxWaitMs);
+  await awaitProviderDefaultSlot(
+    provider,
+    connectionId,
+    signal,
+    currentRequestQueueSettings.maxWaitMs
+  );
 
   const limiter = getLimiter(provider, connectionId, model);
-  const maxWaitMs = currentRequestQueueSettings.maxWaitMs;
+  // Bottleneck `expiration` is an execution lifetime cap, not a pure queue-wait cap.
+  // Codex Responses calls can legitimately run longer than requestQueue.maxWaitMs;
+  // letting Bottleneck expire them aborts healthy upstream work and collapses TPS.
+  const maxWaitMs = provider === "codex" ? 0 : currentRequestQueueSettings.maxWaitMs;
   const scheduleOpts = maxWaitMs && maxWaitMs > 0 ? { expiration: maxWaitMs } : {};
 
   try {

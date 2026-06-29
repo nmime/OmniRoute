@@ -158,3 +158,27 @@ test("getUsageDb cursor-based pagination fetches subsequent pages", async () => 
   assert.equal(page1.data.history.length, 2);
   assert.notEqual(page1.data.nextCursor, null);
 });
+
+test("saveRequestUsage stores zero TTFT when streaming completion omitted it", async () => {
+  await resetStorage();
+
+  await usageHistory.saveRequestUsage({
+    provider: "codex",
+    model: "gpt-5.5",
+    tokens: { input: 10, output: 5 },
+    success: true,
+    latencyMs: 1234,
+    timestamp: new Date().toISOString(),
+  });
+
+  const db = core.getDbInstance();
+  const row = db
+    .prepare("SELECT latency_ms, ttft_ms FROM usage_history ORDER BY id DESC LIMIT 1")
+    .get() as {
+    latency_ms: number;
+    ttft_ms: number;
+  };
+
+  assert.equal(row.latency_ms, 1234);
+  assert.equal(row.ttft_ms, 0);
+});

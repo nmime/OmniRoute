@@ -275,6 +275,9 @@ export async function createChatPipelineHarness(prefix) {
       priority: overrides.priority,
       rateLimitedUntil: overrides.rateLimitedUntil,
       providerSpecificData: overrides.providerSpecificData || {},
+      maxConcurrent: overrides.maxConcurrent,
+      lastUsedAt: overrides.lastUsedAt,
+      consecutiveUseCount: overrides.consecutiveUseCount,
     });
   }
 

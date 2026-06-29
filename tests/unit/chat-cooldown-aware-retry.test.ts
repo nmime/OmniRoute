@@ -9,12 +9,14 @@ process.env.STREAM_READINESS_TIMEOUT_MS = "50";
 const harness = await createChatPipelineHarness("chat-cooldown-aware-retry");
 const auth = await import("../../src/sse/services/auth.ts");
 const { getProviderConnectionById } = await import("../../src/lib/db/providers.ts");
+const { getCallLogById, getCallLogs, getUsageHistory } = await import("../../src/lib/usageDb.ts");
 const {
   BaseExecutor,
   buildOpenAIResponse,
   buildRequest,
   handleChat,
   resetStorage,
+  seedApiKey,
   seedConnection,
   settingsDb,
 } = harness;
@@ -318,4 +320,236 @@ test("handleChat aborts the pending cooldown wait when the client disconnects", 
   assert.ok(elapsedMs < 1_000, `should abort cooldown wait promptly, got ${elapsedMs}ms`);
   assert.equal(response.status, 499);
   assert.equal(body.error.message, "Request aborted");
+});
+
+test("handleChat routes Codex from saturated selected account to another account with capacity", async () => {
+  const selected = await seedConnection("codex", {
+    name: "codex-selected-saturated",
+    apiKey: "sk-codex-selected-saturated",
+    maxConcurrent: 1,
+  });
+  const fallback = await seedConnection("codex", {
+    name: "codex-fallback-capacity",
+    apiKey: "sk-codex-fallback-capacity",
+    maxConcurrent: 1,
+  });
+  await settingsDb.updateSettings({ fallbackStrategy: "fill-first" });
+
+  const { buildAccountSemaphoreKey, acquire, getStats } =
+    await import("../../open-sse/services/accountSemaphore.ts");
+  const selectedKey = buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: (selected as any).id,
+  });
+  const releaseSelected = await acquire(selectedKey, { maxConcurrency: 1, timeoutMs: 200 });
+
+  let fetchCalls = 0;
+  let usedAuth = "";
+  globalThis.fetch = async (_url, init) => {
+    fetchCalls += 1;
+    usedAuth = String(
+      (init as any)?.headers?.Authorization || (init as any)?.headers?.authorization || ""
+    );
+    return buildOpenAIResponse("codex fallback capacity");
+  };
+
+  try {
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5.5",
+          stream: false,
+          messages: [{ role: "user", content: "route around saturated account" }],
+        },
+      })
+    );
+    const body = (await response.json()) as any;
+
+    assert.equal(response.status, 200);
+    assert.equal(fetchCalls, 1);
+    assert.match(usedAuth, /sk-codex-fallback-capacity/);
+    assert.ok(body.id || body.choices || body.output, "expected a successful Codex response body");
+
+    const stats = getStats();
+    const fallbackKey = buildAccountSemaphoreKey({
+      provider: "codex",
+      accountKey: (fallback as any).id,
+    });
+    assert.equal(stats[selectedKey].running, 1);
+    assert.equal(stats[fallbackKey]?.running ?? 0, 0);
+  } finally {
+    releaseSelected();
+  }
+});
+
+test("handleChat waits on local Codex capacity then returns queue timeout without upstream call or provider poisoning", async () => {
+  const first = await seedConnection("codex", {
+    name: "codex-full-a",
+    apiKey: "sk-codex-full-a",
+    maxConcurrent: 1,
+    priority: 1,
+  });
+  const second = await seedConnection("codex", {
+    name: "codex-full-b",
+    apiKey: "sk-codex-full-b",
+    maxConcurrent: 1,
+    priority: 2,
+  });
+
+  const { buildAccountSemaphoreKey, acquire } =
+    await import("../../open-sse/services/accountSemaphore.ts");
+  const releases = await Promise.all(
+    [first, second].map((connection) =>
+      acquire(buildAccountSemaphoreKey({ provider: "codex", accountKey: (connection as any).id }), {
+        maxConcurrency: 1,
+        timeoutMs: 200,
+      })
+    )
+  );
+
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return buildOpenAIResponse("should not be called");
+  };
+
+  const originalTimeout = process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+  process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = "40";
+  const startedAt = Date.now();
+  try {
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5.5",
+          stream: false,
+          messages: [{ role: "user", content: "all codex accounts full" }],
+        },
+      })
+    );
+    const elapsedMs = Date.now() - startedAt;
+    const body = (await response.json()) as any;
+
+    assert.equal(response.status, 429);
+    assert.equal(fetchCalls, 0);
+    assert.ok(elapsedMs < 1_000, `expected bounded local capacity timeout, got ${elapsedMs}ms`);
+    assert.ok(
+      elapsedMs >= 30,
+      `expected request to wait on the local capacity queue, got ${elapsedMs}ms`
+    );
+    assert.equal(body.error.code, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT");
+    assert.equal(body.error.type, "account_semaphore_capacity");
+
+    const callLogs = await getCallLogs({ status: "429", provider: "codex", limit: 5 });
+    const capacityLog = callLogs.find(
+      (entry: any) =>
+        entry.error &&
+        String(entry.error).includes("LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT") &&
+        entry.requestedModel === "codex/gpt-5.5"
+    ) as any;
+    assert.ok(capacityLog, "expected sanitized local capacity reject call log");
+    assert.equal(capacityLog.status, 429);
+    assert.equal(capacityLog.provider, "codex");
+    assert.equal(capacityLog.model, "gpt-5.5");
+    assert.equal(capacityLog.method, "POST");
+    assert.equal(capacityLog.path, "/v1/chat/completions");
+    assert.equal(capacityLog.hasRequestBody, false);
+    assert.equal(capacityLog.hasResponseBody, false);
+    assert.match(capacityLog.error, /account_semaphore_capacity/);
+
+    const capacityDetail = (await getCallLogById(capacityLog.id)) as any;
+    assert.equal(capacityDetail.requestBody, null);
+    assert.equal(capacityDetail.responseBody, null);
+    assert.equal(capacityDetail.tokens.in, 0);
+    assert.equal(capacityDetail.tokens.out, 0);
+
+    const usageHistory = await getUsageHistory({ provider: "codex", model: "gpt-5.5" });
+    const capacityUsage = usageHistory.find(
+      (entry: any) =>
+        entry.status === "429" && entry.errorCode === "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT"
+    ) as any;
+    assert.ok(capacityUsage, "expected usage_history row for local capacity reject");
+    assert.equal(capacityUsage.success, false);
+    assert.equal(capacityUsage.tokens.input, 0);
+    assert.equal(capacityUsage.tokens.output, 0);
+
+    const refreshedFirst = (await getProviderConnectionById((first as any).id)) as any;
+    const refreshedSecond = (await getProviderConnectionById((second as any).id)) as any;
+    for (const connection of [refreshedFirst, refreshedSecond]) {
+      assert.equal(connection.testStatus, "active");
+      assert.ok(connection.rateLimitedUntil == null);
+      assert.ok(connection.errorCode == null);
+      assert.equal(connection.backoffLevel, 0);
+    }
+  } finally {
+    if (originalTimeout === undefined) {
+      delete process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS;
+    } else {
+      process.env.CODEX_LOCAL_CAPACITY_QUEUE_TIMEOUT_MS = originalTimeout;
+    }
+    for (const release of releases) release();
+  }
+});
+
+test("handleChat preserves API key attribution when persisting local Codex capacity rejects", async () => {
+  const connection = await seedConnection("codex", {
+    name: "codex-attributed-full",
+    apiKey: "sk-codex-attributed-full",
+    maxConcurrent: 1,
+  });
+  const apiKey = await seedApiKey({
+    name: "capacity-attribution-key",
+    allowedConnections: [(connection as any).id],
+  });
+
+  const { buildAccountSemaphoreKey, acquire } =
+    await import("../../open-sse/services/accountSemaphore.ts");
+  const release = await acquire(
+    buildAccountSemaphoreKey({ provider: "codex", accountKey: (connection as any).id }),
+    { maxConcurrency: 1, timeoutMs: 200 }
+  );
+
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return buildOpenAIResponse("should not be called");
+  };
+
+  try {
+    const response = await handleChat(
+      buildRequest({
+        authKey: (apiKey as any).key,
+        body: {
+          model: "codex/gpt-5.5",
+          stream: false,
+          messages: [{ role: "user", content: "all codex accounts full with auth" }],
+        },
+      })
+    );
+    await response.json();
+
+    assert.equal(response.status, 429);
+    assert.equal(fetchCalls, 0);
+
+    const callLogs = await getCallLogs({ status: "429", provider: "codex", limit: 5 });
+    const capacityLog = callLogs.find(
+      (entry: any) =>
+        entry.apiKeyId === (apiKey as any).id &&
+        entry.apiKeyName === "capacity-attribution-key" &&
+        entry.requestedModel === "codex/gpt-5.5"
+    ) as any;
+    assert.ok(capacityLog, "expected api key attribution in local capacity call log");
+    assert.equal(capacityLog.hasRequestBody, false);
+    assert.equal(capacityLog.hasResponseBody, false);
+
+    const usageHistory = await getUsageHistory({ provider: "codex", model: "gpt-5.5" });
+    const capacityUsage = usageHistory.find(
+      (entry: any) =>
+        entry.apiKeyId === (apiKey as any).id &&
+        entry.apiKeyName === "capacity-attribution-key" &&
+        entry.status === "429"
+    ) as any;
+    assert.ok(capacityUsage, "expected api key attribution in local capacity usage history");
+  } finally {
+    release();
+  }
 });

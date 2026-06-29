@@ -5,6 +5,14 @@ import {
 } from "../../shared/constants/publicApiRoutes";
 import type { ClassificationReason, RouteClass, RouteClassification } from "./types";
 
+const PUBLIC_CLIENT_API_READ_ENDPOINTS = new Set(["/api/v1/models"]);
+
+function isPublicClientApiRead(path: string, method: string): boolean {
+  const normalizedMethod = String(method).toUpperCase();
+  if (normalizedMethod !== "GET" && normalizedMethod !== "HEAD") return false;
+  return PUBLIC_CLIENT_API_READ_ENDPOINTS.has(path);
+}
+
 const CLIENT_API_ALIAS_PREFIXES: ReadonlyArray<{ alias: string; canonical: string }> = [
   { alias: "/chat/completions", canonical: "/api/v1/chat/completions" },
   { alias: "/responses", canonical: "/api/v1/responses" },
@@ -85,6 +93,13 @@ export function classifyRoute(rawPath: string, method: string = "GET"): RouteCla
   }
 
   if (normalizedPath === "/api/v1" || normalizedPath.startsWith("/api/v1/")) {
+    if (isPublicClientApiRead(normalizedPath, method)) {
+      return {
+        routeClass: "PUBLIC",
+        reason: "public_readonly_prefix",
+        normalizedPath,
+      };
+    }
     return {
       routeClass: "CLIENT_API",
       reason: aliasReason ?? "client_api_v1",

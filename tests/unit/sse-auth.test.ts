@@ -15,6 +15,7 @@ const apiKeysDb = await import("../../src/lib/db/apiKeys.ts");
 const auth = await import("../../src/sse/services/auth.ts");
 const quotaCache = await import("../../src/domain/quotaCache.ts");
 const fallback = await import("../../open-sse/services/accountFallback.ts");
+const accountSemaphore = await import("../../open-sse/services/accountSemaphore.ts");
 
 async function resetStorage() {
   core.resetDbInstance();
@@ -52,6 +53,7 @@ async function seedConnection(provider: string, overrides: any = {}) {
     providerSpecificData: overrides.providerSpecificData || {},
     lastUsedAt: overrides.lastUsedAt,
     consecutiveUseCount: overrides.consecutiveUseCount,
+    maxConcurrent: overrides.maxConcurrent,
   });
 }
 
@@ -65,6 +67,7 @@ async function flushWrites() {
 
 test.beforeEach(async () => {
   await resetStorage();
+  accountSemaphore.resetAll();
 });
 
 test.after(async () => {
@@ -113,6 +116,120 @@ test("extractApiKey parses bearer headers and isValidApiKey validates persisted 
   assert.equal(await auth.isValidApiKey(created.key), true);
   assert.equal(await auth.isValidApiKey("sk-missing"), false);
   assert.equal(await auth.isValidApiKey(""), false);
+});
+
+test("codex local capacity queue waits briefly, reselects a freed account, and never marks rate-limited", async () => {
+  const accountA = await seedConnection("codex", { name: "codex-capacity-a", maxConcurrent: 1 });
+  const accountB = await seedConnection("codex", { name: "codex-capacity-b", maxConcurrent: 1 });
+  const keyA = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountA.id,
+  });
+  const keyB = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: accountB.id,
+  });
+  const releaseA = await accountSemaphore.acquire(keyA, { maxConcurrency: 1, timeoutMs: 100 });
+  const releaseB = await accountSemaphore.acquire(keyB, { maxConcurrency: 1, timeoutMs: 100 });
+
+  const selection = auth.getProviderCredentials("codex", null, null, "gpt-5", {
+    waitForLocalCapacity: true,
+    localCapacityWaitTimeoutMs: 500,
+    localCapacityMaxWaiters: 5,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  releaseB();
+  const selected = await selection;
+
+  assert.ok([accountA.id, accountB.id].includes(selected.connectionId));
+  assert.equal(selected.rateLimitedUntil, null);
+  const selectedKey = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: selected.connectionId,
+  });
+  assert.equal(
+    accountSemaphore.getStats()[selectedKey]?.running ?? 0,
+    0,
+    "capacity waiter must reselect an account with a free local slot"
+  );
+
+  releaseA();
+});
+
+test("codex local capacity queue timeout returns sanitized local 429 metadata without poisoning accounts", async () => {
+  const accountA = await seedConnection("codex", { name: "codex-timeout-a", maxConcurrent: 1 });
+  const accountB = await seedConnection("codex", { name: "codex-timeout-b", maxConcurrent: 1 });
+  const releaseA = await accountSemaphore.acquire(
+    accountSemaphore.buildAccountSemaphoreKey({ provider: "codex", accountKey: accountA.id }),
+    { maxConcurrency: 1, timeoutMs: 100 }
+  );
+  const releaseB = await accountSemaphore.acquire(
+    accountSemaphore.buildAccountSemaphoreKey({ provider: "codex", accountKey: accountB.id }),
+    { maxConcurrency: 1, timeoutMs: 100 }
+  );
+  const startedAt = Date.now();
+
+  const result = await auth.getProviderCredentials("codex", null, null, "gpt-5", {
+    waitForLocalCapacity: true,
+    localCapacityWaitTimeoutMs: 40,
+    localCapacityMaxWaiters: 5,
+  });
+
+  assert.equal(result.allRateLimited, true);
+  assert.equal(result.localCapacityExhausted, true);
+  assert.equal(result.localCapacityQueueReason, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_TIMEOUT");
+  assert.ok(Number(result.localCapacityWaitMs) >= 30);
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(result.localCapacitySnapshot.total, 2);
+  assert.equal(result.localCapacitySnapshot.accounts[0].running, 1);
+
+  const rows = await Promise.all([
+    providersDb.getProviderConnectionById(accountA.id),
+    providersDb.getProviderConnectionById(accountB.id),
+  ]);
+  assert.deepEqual(
+    rows.map((row) => row.rateLimitedUntil ?? null),
+    [null, null]
+  );
+  assert.deepEqual(
+    rows.map((row) => row.backoffLevel ?? 0),
+    [0, 0]
+  );
+
+  releaseA();
+  releaseB();
+});
+
+test("codex local capacity queue full returns fast sanitized metadata", async () => {
+  const account = await seedConnection("codex", { name: "codex-queue-full", maxConcurrent: 1 });
+  const key = accountSemaphore.buildAccountSemaphoreKey({
+    provider: "codex",
+    accountKey: account.id,
+  });
+  const release = await accountSemaphore.acquire(key, { maxConcurrency: 1, timeoutMs: 100 });
+  const firstWaiter = auth.getProviderCredentials("codex", null, null, "gpt-5", {
+    waitForLocalCapacity: true,
+    localCapacityWaitTimeoutMs: 500,
+    localCapacityMaxWaiters: 1,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const startedAt = Date.now();
+  const result = await auth.getProviderCredentials("codex", null, null, "gpt-5", {
+    waitForLocalCapacity: true,
+    localCapacityWaitTimeoutMs: 500,
+    localCapacityMaxWaiters: 1,
+  });
+
+  assert.equal(result.allRateLimited, true);
+  assert.equal(result.localCapacityQueueReason, "LOCAL_ACCOUNT_SEMAPHORE_QUEUE_FULL");
+  assert.equal(result.localCapacityWaitMs, 0);
+  assert.ok(Date.now() - startedAt < 200);
+
+  release();
+  const selected = await firstWaiter;
+  assert.equal(selected.connectionId, account.id);
 });
 
 test("getProviderCredentials reports rate limiting when only inactive suppressed records remain", async () => {

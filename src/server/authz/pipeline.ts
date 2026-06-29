@@ -5,9 +5,9 @@ import { isDraining } from "../../lib/gracefulShutdown";
 import { checkBodySize, getBodySizeLimit } from "../../shared/middleware/bodySizeGuard";
 import { generateRequestId } from "../../shared/utils/requestId";
 import { applyCorsHeaders } from "../cors/origins";
-import { validateBrowserMutationOrigin } from "../origin/publicOrigin";
 import { classifyRoute } from "./classify";
-import { classifyStampedPeerLocality } from "./peerStamp";
+import { classifyHostLocality } from "./routeGuard";
+import { resolveStampedPeer } from "./peerStamp";
 import { clientApiPolicy } from "./policies/clientApi";
 import { managementPolicy } from "./policies/management";
 import { publicPolicy } from "./policies/public";
@@ -21,7 +21,6 @@ import {
   AUTHZ_HEADER_ROUTE_CLASS,
   AUTHZ_TRUSTED_HEADERS,
   PEER_IP_HEADER,
-  VIA_PROXY_HEADER,
 } from "./headers";
 import type { AuthSubject, RouteClass, RouteClassification } from "./types";
 import type { AuthOutcome, RoutePolicy } from "./context";
@@ -169,25 +168,6 @@ function drainingResponse(requestId: string): NextResponse {
   return response;
 }
 
-function invalidOriginResponse(requestId: string): NextResponse {
-  const response = NextResponse.json(
-    {
-      error: {
-        code: "INVALID_ORIGIN",
-        message: "Invalid request origin",
-        correlation_id: requestId,
-      },
-    },
-    { status: 403 }
-  );
-  response.headers.set(AUTHZ_HEADER_REQUEST_ID, requestId);
-  return response;
-}
-
-function isUnsafeMutationMethod(method: string): boolean {
-  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
-}
-
 function stampRouteResponse(
   response: Response,
   requestId: string,
@@ -235,46 +215,28 @@ export async function runAuthzPipeline(
     return response;
   }
 
-  if (guardedPathname.startsWith("/api/") && method !== "GET" && method !== "OPTIONS") {
-    const bodySizeSettings = await getBodySizeSettings();
-    const bodySizeRejection = checkBodySize(
-      request,
-      getBodySizeLimit(guardedPathname, bodySizeSettings)
-    );
-    if (bodySizeRejection) {
-      stampRouteResponse(bodySizeRejection, requestId, classification.routeClass);
-      applyCorsHeaders(bodySizeRejection, request);
-      return bodySizeRejection;
-    }
-  }
-
   const requestHeaders = new Headers(request.headers);
   for (const trusted of AUTHZ_TRUSTED_HEADERS) {
     requestHeaders.delete(trusted);
   }
-  // The trusted peer-IP + via-proxy stamps are read by the policy from the
-  // ORIGINAL request (above); strip them from the forwarded headers so the
-  // per-process token never reaches route handlers or upstream providers.
+  // The trusted peer-IP stamp is read by the policy from the ORIGINAL request
+  // (above); strip it from the forwarded headers so the per-process token never
+  // reaches route handlers or upstream providers.
   requestHeaders.delete(PEER_IP_HEADER);
-  requestHeaders.delete(VIA_PROXY_HEADER);
 
   requestHeaders.set(AUTHZ_HEADER_ROUTE_CLASS, classification.routeClass);
   requestHeaders.set(AUTHZ_HEADER_REQUEST_ID, requestId);
   // Stamp a trusted, non-secret locality verdict derived from the real stamped
-  // peer IP AND the via-proxy marker. Route handlers (e.g. cliTokenAuth) read
-  // this instead of re-deriving locality from the spoofable Host header. The
-  // client-supplied values (if any) were already removed by the
-  // AUTHZ_TRUSTED_HEADERS strip above. When the via-proxy marker is set, a
-  // loopback socket is the proxy hop, not the end-user — verdict is downgraded
-  // to "remote" so the LOCAL_ONLY gate is not bypassed by a request arriving
-  // through an external reverse proxy (nginx / Caddy / Cloudflare Tunnel).
-  // See peerStamp.ts and the upstream da667836 reference for the full rationale.
+  // peer IP. Route handlers (e.g. cliTokenAuth) read this instead of re-deriving
+  // locality from the spoofable Host header. The client-supplied value (if any)
+  // was already removed by the AUTHZ_TRUSTED_HEADERS strip above.
   requestHeaders.set(
     AUTHZ_HEADER_PEER_LOCALITY,
-    classifyStampedPeerLocality(
-      request.headers.get(PEER_IP_HEADER),
-      request.headers.get(VIA_PROXY_HEADER),
-      process.env.OMNIROUTE_PEER_STAMP_TOKEN
+    classifyHostLocality(
+      resolveStampedPeer(
+        request.headers.get(PEER_IP_HEADER),
+        process.env.OMNIROUTE_PEER_STAMP_TOKEN
+      )
     )
   );
 
@@ -307,17 +269,16 @@ export async function runAuthzPipeline(
     return rejection;
   }
 
-  if (
-    classification.routeClass === "MANAGEMENT" &&
-    outcome.subject.kind === "dashboard_session" &&
-    isUnsafeMutationMethod(method)
-  ) {
-    const originVerdict = validateBrowserMutationOrigin(request);
-    if (!originVerdict.ok) {
-      const rejection = invalidOriginResponse(requestId);
-      rejection.headers.set(AUTHZ_HEADER_ROUTE_CLASS, classification.routeClass);
-      applyCorsHeaders(rejection, request);
-      return rejection;
+  if (guardedPathname.startsWith("/api/") && method !== "GET" && method !== "OPTIONS") {
+    const bodySizeSettings = await getBodySizeSettings();
+    const bodySizeRejection = checkBodySize(
+      request,
+      getBodySizeLimit(guardedPathname, bodySizeSettings)
+    );
+    if (bodySizeRejection) {
+      stampRouteResponse(bodySizeRejection, requestId, classification.routeClass);
+      applyCorsHeaders(bodySizeRejection, request);
+      return bodySizeRejection;
     }
   }
 
