@@ -284,3 +284,35 @@ test("rate limit manager recomputes auto-enabled API key connections when queue 
   assert.equal(rateLimitManager.isRateLimitEnabled(explicitConnection.id), true);
   assert.ok(rateLimitManager.getAllRateLimitStatus()[`openai:${autoConnection.id}`]);
 });
+
+
+test("Codex rate limiting does not expire a running provider call at maxWaitMs", async () => {
+  const connectionId = "conn-codex-long-running";
+  await rateLimitManager.__resetRateLimitManagerForTests();
+  await rateLimitManager.applyRequestQueueSettings({
+    autoEnableApiKeyProviders: false,
+    requestsPerMinute: 0,
+    minTimeBetweenRequestsMs: 0,
+    concurrentRequests: 1,
+    maxWaitMs: 20,
+  });
+  rateLimitManager.enableRateLimitProtection(connectionId);
+
+  try {
+    const startedAt = Date.now();
+    const result = await rateLimitManager.withRateLimit(
+      "codex",
+      connectionId,
+      "gpt-5.5",
+      async () => {
+        await wait(60);
+        return "completed";
+      }
+    );
+
+    assert.equal(result, "completed");
+    assert.ok(Date.now() - startedAt >= 50);
+  } finally {
+    await rateLimitManager.__resetRateLimitManagerForTests();
+  }
+});

@@ -4,10 +4,12 @@ import { afterEach, describe, it } from "node:test";
 import {
   acquire,
   buildAccountSemaphoreKey,
+  getSnapshot,
   getStats,
   markBlocked,
   reset,
   resetAll,
+  tryAcquire,
 } from "../../open-sse/services/accountSemaphore";
 
 afterEach(() => {
@@ -175,4 +177,40 @@ describe("accountSemaphore", async () => {
     assert.equal(stats.maxConcurrency, 2);
     assert.ok(stats.blockedUntil !== null, "blockedUntil should be set");
   });
+
+  it("tryAcquire reports full accounts immediately without queueing", async () => {
+    const key = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-full" });
+
+    const release = await acquire(key, { maxConcurrency: 1, timeoutMs: 200 });
+    const result = tryAcquire(key, { maxConcurrency: 1 });
+
+    assert.equal(result.acquired, false);
+    assert.equal(result.reason, "full");
+    assert.equal(result.snapshot.running, 1);
+    assert.equal(result.snapshot.queued, 0);
+    assert.deepEqual(getSnapshot(key), {
+      running: 1,
+      queued: 0,
+      maxConcurrency: 1,
+      blockedUntil: null,
+    });
+
+    result.release();
+    release();
+    assert.equal(getStats()[key]?.running ?? 0, 0);
+  });
+
+  it("tryAcquire reports blocked accounts distinctly without poisoning provider state", async () => {
+    const key = buildAccountSemaphoreKey({ provider: "codex", accountKey: "acct-blocked" });
+
+    markBlocked(key, 1_000);
+    const result = tryAcquire(key, { maxConcurrency: 1 });
+
+    assert.equal(result.acquired, false);
+    assert.equal(result.reason, "blocked");
+    assert.equal(result.snapshot.running, 0);
+    assert.equal(result.snapshot.queued, 0);
+    assert.ok(result.snapshot.blockedUntil);
+  });
+
 });

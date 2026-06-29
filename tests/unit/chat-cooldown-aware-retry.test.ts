@@ -319,3 +319,122 @@ test("handleChat aborts the pending cooldown wait when the client disconnects", 
   assert.equal(response.status, 499);
   assert.equal(body.error.message, "Request aborted");
 });
+
+
+test("handleChat routes Codex from saturated selected account to another account with capacity", async () => {
+  const selected = await seedConnection("codex", {
+    name: "codex-selected-saturated",
+    apiKey: "sk-codex-selected-saturated",
+    maxConcurrent: 1,
+  });
+  const fallback = await seedConnection("codex", {
+    name: "codex-fallback-capacity",
+    apiKey: "sk-codex-fallback-capacity",
+    maxConcurrent: 1,
+  });
+  await settingsDb.updateSettings({ fallbackStrategy: "fill-first" });
+
+  const { buildAccountSemaphoreKey, acquire, getStats } = await import(
+    "../../open-sse/services/accountSemaphore.ts"
+  );
+  const selectedKey = buildAccountSemaphoreKey({ provider: "codex", accountKey: (selected as any).id });
+  const releaseSelected = await acquire(selectedKey, { maxConcurrency: 1, timeoutMs: 200 });
+
+  let fetchCalls = 0;
+  let usedAuth = "";
+  globalThis.fetch = async (_url, init) => {
+    fetchCalls += 1;
+    usedAuth = String((init as any)?.headers?.Authorization || (init as any)?.headers?.authorization || "");
+    return buildOpenAIResponse("codex fallback capacity");
+  };
+
+  try {
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5.5",
+          stream: false,
+          messages: [{ role: "user", content: "route around saturated account" }],
+        },
+      })
+    );
+    const body = (await response.json()) as any;
+
+    assert.equal(response.status, 200);
+    assert.equal(fetchCalls, 1);
+    assert.match(usedAuth, /sk-codex-fallback-capacity/);
+    assert.ok(body.id || body.choices || body.output, "expected a successful Codex response body");
+
+    const stats = getStats();
+    const fallbackKey = buildAccountSemaphoreKey({ provider: "codex", accountKey: (fallback as any).id });
+    assert.equal(stats[selectedKey].running, 1);
+    assert.equal(stats[fallbackKey]?.running ?? 0, 0);
+  } finally {
+    releaseSelected();
+  }
+});
+
+test("handleChat fast-fails local Codex capacity without upstream call or provider poisoning", async () => {
+  const first = await seedConnection("codex", {
+    name: "codex-full-a",
+    apiKey: "sk-codex-full-a",
+    maxConcurrent: 1,
+    priority: 1,
+  });
+  const second = await seedConnection("codex", {
+    name: "codex-full-b",
+    apiKey: "sk-codex-full-b",
+    maxConcurrent: 1,
+    priority: 2,
+  });
+
+  const { buildAccountSemaphoreKey, acquire } = await import(
+    "../../open-sse/services/accountSemaphore.ts"
+  );
+  const releases = await Promise.all(
+    [first, second].map((connection) =>
+      acquire(buildAccountSemaphoreKey({ provider: "codex", accountKey: (connection as any).id }), {
+        maxConcurrency: 1,
+        timeoutMs: 200,
+      })
+    )
+  );
+
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return buildOpenAIResponse("should not be called");
+  };
+
+  const startedAt = Date.now();
+  try {
+    const response = await handleChat(
+      buildRequest({
+        body: {
+          model: "codex/gpt-5.5",
+          stream: false,
+          messages: [{ role: "user", content: "all codex accounts full" }],
+        },
+      })
+    );
+    const elapsedMs = Date.now() - startedAt;
+    const body = (await response.json()) as any;
+
+    assert.equal(response.status, 429);
+    assert.equal(fetchCalls, 0);
+    assert.ok(elapsedMs < 1_000, `expected fast local capacity failure, got ${elapsedMs}ms`);
+    assert.equal(body.error.code, "LOCAL_ACCOUNT_SEMAPHORE_FULL");
+    assert.equal(body.error.type, "account_semaphore_capacity");
+
+    const refreshedFirst = (await getProviderConnectionById((first as any).id)) as any;
+    const refreshedSecond = (await getProviderConnectionById((second as any).id)) as any;
+    for (const connection of [refreshedFirst, refreshedSecond]) {
+      assert.equal(connection.testStatus, "active");
+      assert.ok(connection.rateLimitedUntil == null);
+      assert.ok(connection.errorCode == null);
+      assert.equal(connection.backoffLevel, 0);
+    }
+  } finally {
+    for (const release of releases) release();
+  }
+});
