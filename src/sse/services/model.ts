@@ -76,26 +76,85 @@ export async function resolveModelAlias(alias) {
 }
 
 /**
- * Look up custom-model metadata from the DB in a single read:
- *  - apiFormat: "responses" when the model is configured for the Responses API.
- *  - targetFormat: the optional per-model wire format override (#2905).
+ * Look up route-format metadata. Provider-node api_type is provider-wide and
+ * customModels metadata is per-model; per-model metadata wins when both exist.
  */
+type RouteFormatMeta = { apiFormat?: string; targetFormat?: string };
+
+function routeMetaFromProviderNode(node: any): RouteFormatMeta {
+  const apiType = String(node?.apiType ?? node?.api_type ?? "")
+    .trim()
+    .toLowerCase();
+  if (apiType === "responses" || apiType === "openai-responses") {
+    return { apiFormat: "responses" };
+  }
+  return {};
+}
+
+async function lookupProviderNode(providerIdOrAlias: string): Promise<any | null> {
+  try {
+    const nodes = await getProviderNodes();
+    return Array.isArray(nodes)
+      ? nodes.find(
+          (node: any) => node?.id === providerIdOrAlias || node?.prefix === providerIdOrAlias
+        ) || null
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function lookupProviderNodeMeta(providerId: string): Promise<RouteFormatMeta> {
+  const match = await lookupProviderNode(providerId);
+  return routeMetaFromProviderNode(match);
+}
+
 async function lookupCustomModelMeta(
   providerId: string,
-  modelId: string
-): Promise<{ apiFormat?: string; targetFormat?: string }> {
+  modelId: string,
+  providerNode?: any
+): Promise<RouteFormatMeta> {
+  const providerMeta = providerNode
+    ? routeMetaFromProviderNode(providerNode)
+    : await lookupProviderNodeMeta(providerId);
+
   try {
     const models = await getCustomModels(providerId);
-    if (!Array.isArray(models)) return {};
+    if (!Array.isArray(models)) return providerMeta;
     const match = models.find((m: any) => m.id === modelId);
-    if (!match) return {};
+    if (!match) return providerMeta;
     return {
-      apiFormat: match.apiFormat === "responses" ? "responses" : undefined,
-      targetFormat: typeof match.targetFormat === "string" ? match.targetFormat : undefined,
+      ...providerMeta,
+      ...(match.apiFormat === "responses" ? { apiFormat: "responses" } : {}),
+      ...(typeof match.targetFormat === "string" ? { targetFormat: match.targetFormat } : {}),
     };
   } catch {
-    return {};
+    return providerMeta;
   }
+}
+
+/**
+ * Resolve a dashboard-configured model alias using the same merged alias sources
+ * as request routing (DB aliases plus Settings UI aliases, with Settings winning).
+ */
+export async function resolveConfiguredModelAlias(alias) {
+  const aliases = await getCombinedModelAliases();
+  const resolved = resolveModelAliasFromMap(alias, aliases);
+  if (!resolved?.provider || !resolved?.model) return resolved;
+
+  const providerNode = await lookupProviderNode(String(resolved.provider));
+  const providerId = providerNode?.id ? String(providerNode.id) : String(resolved.provider);
+  const { apiFormat, targetFormat } = await lookupCustomModelMeta(
+    providerId,
+    String(resolved.model),
+    providerNode
+  );
+  return {
+    ...resolved,
+    provider: providerId,
+    ...(apiFormat && { apiFormat }),
+    ...(targetFormat && { targetFormat }),
+  };
 }
 
 /**
@@ -107,13 +166,17 @@ export async function getModelInfo(modelStr) {
 
   const attachCustomApiFormat = async (info: any) => {
     if (!info?.provider || !info?.model) return info;
+    const providerNode = await lookupProviderNode(String(info.provider));
+    const providerId = providerNode?.id ? String(providerNode.id) : String(info.provider);
     const { apiFormat, targetFormat } = await lookupCustomModelMeta(
-      String(info.provider),
-      String(info.model)
+      providerId,
+      String(info.model),
+      providerNode
     );
-    if (apiFormat || targetFormat) {
+    if (providerNode || apiFormat || targetFormat) {
       return {
         ...info,
+        provider: providerId,
         ...(apiFormat && { apiFormat }),
         ...(targetFormat && { targetFormat }),
       };
@@ -148,7 +211,8 @@ export async function getModelInfo(modelStr) {
       if (matchedOpenAI) {
         const { apiFormat, targetFormat } = await lookupCustomModelMeta(
           matchedOpenAI.id as string,
-          parsed.model as string
+          parsed.model as string,
+          matchedOpenAI
         );
         return {
           provider: matchedOpenAI.id,
@@ -167,7 +231,8 @@ export async function getModelInfo(modelStr) {
       if (matchedAnthropic) {
         const { apiFormat, targetFormat } = await lookupCustomModelMeta(
           matchedAnthropic.id as string,
-          parsed.model as string
+          parsed.model as string,
+          matchedAnthropic
         );
         return {
           provider: matchedAnthropic.id,
