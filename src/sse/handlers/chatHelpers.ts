@@ -402,7 +402,7 @@ export async function executeChatWithBreaker({
   cachedSettings,
   skipUpstreamRetry = false,
   trafficType = "production",
-  correlationId = null,
+  localCapacityEligibleConnectionIds = null,
 }: ExecuteChatWithBreakerOptions): Promise<{ result: any; tlsFingerprintUsed: boolean }> {
   let tlsFingerprintUsed = false;
   const normalizedTrafficType: TrafficType =
@@ -431,7 +431,7 @@ export async function executeChatWithBreaker({
           cachedSettings,
           skipUpstreamRetry,
           trafficType: normalizedTrafficType,
-          correlationId,
+          localCapacityEligibleConnectionIds,
           onCredentialsRefreshed: async (newCreds: any) => {
             await updateProviderCredentials(credentials.connectionId, {
               accessToken: newCreds.accessToken,
