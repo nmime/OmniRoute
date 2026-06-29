@@ -95,13 +95,46 @@ export const waitForCooldownSettingsSchema = z
   })
   .strict();
 
+// Quota-share combo cooldown-aware retry (Variante A). Bounds mirror
+// normalizeComboCooldownWaitSettings: a single wait <= 30s, <= 10 attempts.
+export const comboCooldownWaitSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxWaitMs: z.number().int().min(0).max(30000).optional(),
+    maxAttempts: z.number().int().min(0).max(10).optional(),
+    budgetMs: z.number().int().min(0).max(300000).optional(),
+  })
+  .strict();
+
+// FASE 2.1: kill-switch for the per-connection quota-share concurrency limit.
+// The cap itself comes from each connection's max_concurrent, so only `enabled`
+// is configurable here.
+export const quotaShareConcurrencyLimitSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
 export const providerCooldownSettingsSchema = z
   .object({
     enabled: z.boolean().optional(),
     minRetryCooldownMs: z.number().int().min(0).max(300000).optional(),
     maxRetryCooldownMs: z.number().int().min(0).max(3600000).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      typeof value.minRetryCooldownMs === "number" &&
+      typeof value.maxRetryCooldownMs === "number" &&
+      value.maxRetryCooldownMs < value.minRetryCooldownMs
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "maxRetryCooldownMs must be greater than or equal to minRetryCooldownMs",
+        path: ["maxRetryCooldownMs"],
+      });
+    }
+  });
 
 export const updateResilienceSchema = z
   .object({
@@ -121,6 +154,8 @@ export const updateResilienceSchema = z
       .strict()
       .optional(),
     waitForCooldown: waitForCooldownSettingsSchema.optional(),
+    comboCooldownWait: comboCooldownWaitSettingsSchema.optional(),
+    quotaShareConcurrencyLimit: quotaShareConcurrencyLimitSettingsSchema.optional(),
     providerCooldown: providerCooldownSettingsSchema.optional(),
     profiles: z
       .object({
@@ -138,6 +173,8 @@ export const updateResilienceSchema = z
       !value.connectionCooldown &&
       !value.providerBreaker &&
       !value.waitForCooldown &&
+      !value.comboCooldownWait &&
+      !value.quotaShareConcurrencyLimit &&
       !value.providerCooldown &&
       !value.profiles &&
       !value.defaults

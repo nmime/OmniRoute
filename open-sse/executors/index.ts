@@ -1,5 +1,4 @@
 import { AntigravityExecutor } from "./antigravity.ts";
-import { GeminiCLIExecutor } from "./gemini-cli.ts";
 import { GithubExecutor } from "./github.ts";
 import { QoderExecutor } from "./qoder.ts";
 import { KiroExecutor } from "./kiro.ts";
@@ -34,6 +33,7 @@ import { DeepSeekWebWithAutoRefreshExecutor } from "./deepseek-web-with-auto-ref
 import { AdaptaWebExecutor } from "./adapta-web.ts";
 import { ClaudeWebWithAutoRefresh } from "./claude-web-with-auto-refresh.ts";
 import { CopilotWebExecutor } from "./copilot-web.ts";
+import { CopilotM365WebExecutor } from "./copilot-m365-web.ts";
 import { VeoAIFreeWebExecutor } from "./veoaifree-web.ts";
 import { DuckDuckGoWebExecutor } from "./duckduckgo-web.ts";
 import { T3ChatWebExecutor } from "./t3-chat-web.ts";
@@ -47,16 +47,18 @@ import { V0VercelWebExecutor } from "./v0-vercel-web.ts";
 import { KimiWebExecutor } from "./kimi-web.ts";
 import { DoubaoWebExecutor } from "./doubao-web.ts";
 import { QwenWebExecutor } from "./qwen-web.ts";
-import { KimiExecutor } from "./kimi.ts"
+import { KimiExecutor } from "./kimi.ts";
 import { TheOldLlmExecutor } from "./theoldllm.ts";
 import { ChipotleExecutor } from "./chipotle.ts";
 import { LMArenaExecutor } from "./lmarena.ts";
 import { MimocodeExecutor } from "./mimocode.ts";
+import { GrokCliExecutor } from "./grok-cli.ts";
+import { CodeBuddyCnExecutor } from "./codebuddy-cn.ts";
+import { ZenmuxFreeExecutor } from "./zenmux-free.ts";
 
 const executors = {
   antigravity: new AntigravityExecutor(),
   agy: new AntigravityExecutor(),
-  "gemini-cli": new GeminiCLIExecutor(),
   github: new GithubExecutor(),
   qoder: new QoderExecutor(),
   kiro: new KiroExecutor(),
@@ -114,6 +116,7 @@ const executors = {
   "adapta-web": new AdaptaWebExecutor(),
   "adp-web": new AdaptaWebExecutor(), // Alias
   "copilot-web": new CopilotWebExecutor(),
+  "copilot-m365-web": new CopilotM365WebExecutor(),
   copilot: new CopilotWebExecutor(), // Alias
   "veoaifree-web": new VeoAIFreeWebExecutor(),
   "veo-free": new VeoAIFreeWebExecutor(), // Alias
@@ -134,7 +137,6 @@ const executors = {
   "v0-vercel-web": new V0VercelWebExecutor(),
   v0: new V0VercelWebExecutor(), // Alias
   "kimi-web": new KimiWebExecutor(),
-  kimi: new KimiWebExecutor(), // Alias
   "kimi-coding-apikey": new KimiExecutor(), // Alias
   "kimi-coding": new KimiExecutor(), // Alias
   "doubao-web": new DoubaoWebExecutor(),
@@ -149,6 +151,12 @@ const executors = {
   lma: new LMArenaExecutor(), // Alias
   mimocode: new MimocodeExecutor(),
   mcode: new MimocodeExecutor(), // Alias
+  "grok-cli": new GrokCliExecutor(),
+  gc: new GrokCliExecutor(), // Alias
+  "codebuddy-cn": new CodeBuddyCnExecutor(),
+  cbcn: new CodeBuddyCnExecutor(), // Alias for codebuddy-cn
+  "zenmux-free": new ZenmuxFreeExecutor(),
+  zmf: new ZenmuxFreeExecutor(), // Alias for zenmux-free
 };
 
 const defaultCache = new Map();
@@ -165,7 +173,6 @@ export function hasSpecializedExecutor(provider) {
 
 export { BaseExecutor } from "./base.ts";
 export { AntigravityExecutor } from "./antigravity.ts";
-export { GeminiCLIExecutor } from "./gemini-cli.ts";
 export { GithubExecutor } from "./github.ts";
 export { QoderExecutor } from "./qoder.ts";
 export { KiroExecutor } from "./kiro.ts";
@@ -196,6 +203,7 @@ export { NlpCloudExecutor } from "./nlpcloud.ts";
 export { WindsurfExecutor } from "./windsurf.ts";
 export { DevinCliExecutor } from "./devin-cli.ts";
 export { CopilotWebExecutor } from "./copilot-web.ts";
+export { CopilotM365WebExecutor } from "./copilot-m365-web.ts";
 export { VeoAIFreeWebExecutor } from "./veoaifree-web.ts";
 export { DuckDuckGoWebExecutor } from "./duckduckgo-web.ts";
 export { ClaudeWebExecutor } from "./claude-web.ts";
@@ -209,3 +217,6 @@ export { TheOldLlmExecutor } from "./theoldllm.ts";
 export { ChipotleExecutor } from "./chipotle.ts";
 export { LMArenaExecutor } from "./lmarena.ts";
 export { MimocodeExecutor } from "./mimocode.ts";
+export { GrokCliExecutor } from "./grok-cli.ts";
+export { CodeBuddyCnExecutor } from "./codebuddy-cn.ts";
+export { ZenmuxFreeExecutor } from "./zenmux-free.ts";

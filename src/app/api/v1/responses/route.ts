@@ -122,16 +122,30 @@ export async function OPTIONS() {
 }
 
 /**
- * Preserve configured routing for /v1/responses. The generic HTTP Responses
- * endpoint must not force a bare ChatGPT-style model to Codex; it only prefixes
- * Codex when normal dashboard/model routing already selected Codex.
+ * Rewrite a bare ChatGPT-style model id to the codex/ prefix when the model
+ * resolves to a codex provider. This fixes the Codex CLI WS→HTTP fallback path:
+ * the CLI sends bare "gpt-5.5" over HTTP after WS closes (1008 Policy), and
+ * without this rewrite OmniRoute routes it to openrouter instead of codex.
+ *
+ * Accepts an optional `preParsedBody` (threaded from withInjectionGuard via #4041)
+ * to avoid re-cloning the request when the body was already parsed upstream.
+ *
+ * Safe: only rewrites when codex/model is genuinely registered; all other models
+ * pass through unchanged. Errors are caught and the original request + body are returned.
  */
-export async function withConfiguredResponsesModel(request: Request): Promise<Request | Response> {
+export async function withCodexPreferredModel(
+  request: Request,
+  preParsedBody: any = null
+): Promise<{ request: Request; body: any }> {
   try {
-    const clone = request.clone();
-    const body = await clone.json().catch(() => null);
+    const body =
+      preParsedBody ??
+      (await request
+        .clone()
+        .json()
+        .catch(() => null));
     if (!body || typeof body !== "object" || typeof body.model !== "string") {
-      return request;
+      return { request, body };
     }
     const { model, changed, error } = await resolveResponsesApiModel(
       body.model,
@@ -139,64 +153,52 @@ export async function withConfiguredResponsesModel(request: Request): Promise<Re
       async (name) => !!(await getComboByName(name)),
       resolveConfiguredModelAlias
     );
-    if (error) {
-      return new Response(
-        JSON.stringify({ error: { message: error, type: "invalid_request_error" } }),
-        {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        }
-      );
-    }
-    if (!changed) return request;
+    if (!changed) return { request, body };
 
-    return requestWithJsonModel(request, body as Record<string, unknown>, model);
+    const rewrittenBody = { ...body, model };
+    return {
+      request: new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: JSON.stringify(rewrittenBody),
+        signal: request.signal,
+      }),
+      body: rewrittenBody,
+    };
   } catch {
-    return request;
+    return { request, body: preParsedBody };
   }
 }
 
 /**
  * POST /v1/responses - OpenAI Responses API format
  * Handled by the unified chat handler (openai-responses format auto-detected).
+ *
+ * `preParsedBody` is threaded from withInjectionGuard (#4041) so the body is
+ * parsed at most once per request instead of 3-4x on the hot codex path.
  */
-async function postHandler(request, context) {
+async function postHandler(request: any, context: any, preParsedBody: any = null) {
   // Codex CLI (wire_api="responses") consumes this endpoint over SSE and its reqwest
   // client drops the connection if no bytes arrive within ~5s. Keep the connection
   // warm with early keepalives while the upstream produces its first token (#2544).
   // Non-streaming callers (JSON) keep the original verbatim path untouched.
-  const originalBody = await request
-    .clone()
-    .json()
-    .catch(() => null);
-  const originalJsonBody =
-    originalBody && typeof originalBody === "object" && !Array.isArray(originalBody)
-      ? (originalBody as Record<string, unknown>)
-      : null;
-  const resolved = await withConfiguredResponsesModel(request);
-  if (resolved instanceof Response) return resolved;
+  const { request: resolved, body: resolvedBody } = await withCodexPreferredModel(
+    request,
+    preParsedBody
+  );
   const accept = String(request.headers?.get?.("accept") || "").toLowerCase();
   if (accept.includes("text/event-stream")) {
     // Adaptive threshold: web-session and anonymous-fallback providers are slower
     // to produce the first byte, so use a longer keepalive threshold (15s vs 2s).
-    let model;
-    try {
-      const body = await resolved
-        .clone()
-        .json()
-        .catch(() => null);
-      model = body?.model;
-    } catch {}
+    // Reuse resolvedBody.model — no extra clone/parse needed (#4041).
+    const model = resolvedBody?.model;
     const thresholdMs = resolveKeepaliveThreshold(model);
-    return await withEarlyStreamKeepalive(
-      handleResponsesWithCodexFallback(resolved, originalJsonBody),
-      {
-        signal: request.signal,
-        thresholdMs,
-      }
-    );
+    return await withEarlyStreamKeepalive(handleChat(resolved, null, resolvedBody), {
+      signal: request.signal,
+      thresholdMs,
+    });
   }
-  return await handleResponsesWithCodexFallback(resolved, originalJsonBody);
+  return await handleChat(resolved, null, resolvedBody);
 }
 
 const guardedPostHandler = withInjectionGuard(postHandler);
